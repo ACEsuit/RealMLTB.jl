@@ -191,3 +191,30 @@ function find_symmetric_perms(i, j, k)
         return [[1, 2, 3], [2, 1, 3], [2, 3, 1]]
     end
 end
+
+function compute_pair_AO_integrals(bs, R_bohr)
+    molR_list = [bs.atoms...]
+    nbas = bs.nbas
+    for atoms in bs.atoms
+        atoms_R = Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr)
+        push!(molR_list, atoms_R)
+    end
+
+    bs_pair = BasisSet(bs.name, molR_list; spherical=false, lib=:acsint)
+    S_pair = overlap(bs_pair)[1:nbas, nbas+1:2*nbas]
+    T_pair = kinetic(bs_pair)[1:nbas, nbas+1:2*nbas]
+
+    out = zeros(bs_pair.nbas, bs_pair.nbas, bs_pair.nbas)
+    EPI_1e3c!(out, bs_pair)
+    V_pair = out[1:nbas, 1:nbas, nbas+1:2*nbas]
+    return T_pair, V_pair, S_pair
+end
+
+function compute_AO_integrals(bs)
+    S_pair = overlap(bs)
+    T_pair = kinetic(bs)
+
+    V_pair = zeros(bs.nbas, bs.nbas, bs.nbas)
+    EPI_1e3c!(V_pair, bs)
+    return T_pair, V_pair, S_pair
+end
