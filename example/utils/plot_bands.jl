@@ -61,9 +61,12 @@ function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], ke
     kpoints = bands.kinter
 
     ref_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in bands.eigenvalues])
-    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, node_data = Vector(kpoints))
+
+    klist = physical_k.(Ref(sys), kpoints)
+    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, node_data = klist)
+
     predict = model(G2, ps, st)[1]
-    predict_bands = (; bands..., eigenvalues = [eigs for eigs in predict])
+    predict_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in predict])
 
     p = compare_bandstructure(ref_bands, predict_bands)
     savefig(p, "bandstructure.png")

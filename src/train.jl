@@ -6,10 +6,9 @@ function RMSE(G, λ_ref, model, ps, st; keep_bands = 4)
     return norm(λ_pred_keep_bands - λ_ref)
 end
 
-function train(G, model, ps, st, keep_bands, dataset; iterations = 1000)
+function train(G, model, ps, st, keep_bands, λ_ref; iterations = 1000)
     # Flatten parameters
     x0, re = destructure(ps)
-    λ_ref = getfield.(dataset, 2)
     f(x) = RMSE(G, λ_ref, model, re(x), st; keep_bands = keep_bands)
     function g!(storage, x)
         storage .= Zygote.gradient(x -> f(x), x)[1]

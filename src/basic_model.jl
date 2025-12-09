@@ -13,19 +13,16 @@ end
 
 function LuxCore.initialparameters(rng::AbstractRNG, l::Simple3Center{NORB, NBAS, NATOM}) where {NORB, NBAS, NATOM}
    Wv = glorot_normal(rng, Float64, NBAS)
+   Wb = glorot_normal(rng, Float64, NORB * NATOM, NBAS) 
 
-   S_AO = overlap(l.basisset)
-
-   vals, vecs = eigen(Symmetric(S_AO))
-   mask = vals .> 1e-6
-   inv_sqrt_vals = zeros(eltype(vals), length(vals))
-   inv_sqrt_vals[mask] .= 1.0 ./ sqrt.(vals[mask])
-   
-   S_inv_sqrt = vecs * Diagonal(inv_sqrt_vals) * vecs'
-   
-   target_rows = NORB * NATOM
-   Wb = S_inv_sqrt[1:target_rows, :]
-
+   # S_AO = overlap(l.basisset)
+   # vals, vecs = eigen(Symmetric(S_AO))
+   # mask = vals .> 1e-6
+   # inv_sqrt_vals = zeros(eltype(vals), length(vals))
+   # inv_sqrt_vals[mask] .= 1.0 ./ sqrt.(vals[mask])
+   # S_inv_sqrt = vecs * Diagonal(inv_sqrt_vals) * vecs'
+   # target_rows = NORB * NATOM
+   # S_inv_sqrt[1:target_rows, :]
    return (Wv = Wv, Wb = Wb, )
 end
 

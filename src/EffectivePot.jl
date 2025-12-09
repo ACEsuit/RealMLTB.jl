@@ -196,7 +196,7 @@ function compute_pair_AO_integrals(bs, R_bohr)
     molR_list = [bs.atoms...]
     nbas = bs.nbas
     for atoms in bs.atoms
-        atoms_R = Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr)
+        atoms_R = Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
         push!(molR_list, atoms_R)
     end
 
@@ -218,3 +218,4 @@ function compute_AO_integrals(bs)
     EPI_1e3c!(V_pair, bs)
     return T_pair, V_pair, S_pair
 end
+

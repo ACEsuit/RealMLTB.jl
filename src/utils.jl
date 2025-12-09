@@ -3,7 +3,7 @@ function _construct_integral_core(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
    M      = reshape(V_pair_raw, nbas^2, nbas)
    V_pair = reshape(M * Wv, nbas, nbas)
 
-   A = -0.5 * T_pair + V_pair
+   A = T_pair + V_pair
    H = Wb * A      * Wb'
    S = Wb * S_pair * Wb'
    return H, S
@@ -28,7 +28,7 @@ function _construct_integral_primal(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
    M      = reshape(V_pair_raw, nbas^2, nbas)
    V_pair = reshape(M * Wv, nbas, nbas)
 
-   A = -0.5 * T_pair + V_pair
+   A = T_pair + V_pair
    H = Wb * A      * Wb'
    S = Wb * S_pair * Wb'
    return H, S, A, M
@@ -144,6 +144,20 @@ function atom_ao_ranges(bs::BasisSet, Wb)
       offset += n
    end
    return NORB, nat, ao_ranges
+end
+
+function atom_ao_ranges(bs::BasisSet)
+   nao_per_atom = bs.basis_per_atom
+   nat   = bs.natoms
+
+   ao_ranges = Vector{UnitRange{Int}}(undef, nat)
+   offset = 0
+   for i in 1:nat
+      n = nao_per_atom[i]
+      ao_ranges[i] = (offset+1):(offset+n)
+      offset += n
+   end
+   return nao_per_atom[1], nat, ao_ranges
 end
 
 function generate_λ(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
