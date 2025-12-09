@@ -29,21 +29,10 @@ klist = getfield.(dataset, 1)
 λ_ref = getfield.(dataset, 2)
 
 G     = nlist2graph(bs, nlist, sys, klist)
-
-println("Reference Eigenvalues Range:")
-println("Min: ", minimum(Iterators.flatten(λ_ref)))
-println("Max: ", maximum(Iterators.flatten(λ_ref)))
-
 ps, x_history = train(G, model, ps, st, keep_bands, λ_ref; iterations = 3000)
 error         = RMSE(G, λ_ref, model, ps, st; keep_bands = keep_bands)
 
 λ_pred,  = model(G, ps, st)
 λ_pred = getindex.(λ_pred, Ref(1:keep_bands))
 
-
-println("Reference Eigenvalues Range:")
-println("Min: ", minimum(Iterators.flatten(λ_ref)))
-println("Max: ", maximum(Iterators.flatten(λ_ref)))
-
-data = [(dataset[i][1], λ_pred[i]) for i = 1:length(dataset)]
 compute_and_save_bandstructures(sys, model, ps, st; kgrid = kgrid, keep_bands = keep_bands)

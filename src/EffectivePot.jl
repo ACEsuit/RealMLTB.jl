@@ -1,6 +1,5 @@
 using GaussianBasis
 import GaussianBasis: num_basis
-using Molecules
 
 const ang2bohr = GaussianBasis.Acsint.ang2bohr
 
@@ -192,11 +191,13 @@ function find_symmetric_perms(i, j, k)
     end
 end
 
+using Molecules
+
 function compute_pair_AO_integrals(bs, R_bohr)
     molR_list = [bs.atoms...]
     nbas = bs.nbas
     for atoms in bs.atoms
-        atoms_R = Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
+        atoms_R = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
         push!(molR_list, atoms_R)
     end
 

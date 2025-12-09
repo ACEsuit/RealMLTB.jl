@@ -85,8 +85,6 @@ function generate_band_data(sys, kgrid; keep_bands::Int = 4)
     return dataset
 end
 
-const ang2bohr = GaussianBasis.Acsint.ang2bohr
-
 function nlist2graph(bs, nlist, sys, klist)
    X = position(sys, :)
    ii = copy(nlist.i)
@@ -105,7 +103,7 @@ function nlist2graph(bs, nlist, sys, klist)
       neigs, Rs = NeighbourLists.neigs(nlist, n)
       for m = 1:length(neigs)
          idx += 1
-         Rcell[idx] = (Rs[m] - ustrip.(X[neigs[m]] - X[n])) .* ang2bohr
+         Rcell[idx] = (Rs[m] - ustrip.(X[neigs[m]] - X[n])) .* RealMLTB.ang2bohr
          T_pair, V_pair, S_pair = RealMLTB.compute_pair_AO_integrals(bs, Rcell[idx])
          push!(Tlist, T_pair)
          push!(Vlist, V_pair)
