@@ -55,4 +55,4 @@ for k=1:N_sph, j=1:N_sph, i=1:N_sph
 end
 
 diff_sph = norm(V_julia_sph_norm - V_ref_sph)
-println("Cartesian Spherical Error (Analytic Julia vs Grid PySCF): ", diff_sph)
+println("Spherical Integral Error (Analytic Julia vs Grid PySCF): ", diff_sph)
