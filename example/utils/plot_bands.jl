@@ -45,8 +45,8 @@ function compare_bandstructure(band_data::NamedTuple, band_data2::NamedTuple;
 end
 
 function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], keep_bands = 4)
-    lattice = get_lattice(sys)
-    positions = fractional_coordinates(sys)
+    lattice = RealMLTB.get_lattice(sys)
+    positions = RealMLTB.fractional_coordinates(sys)
 
     # Define LDA pseudopotential model for Si
     Si = ElementPsp(:Si, PseudoFamily("dojo.nc.sr.lda.v0_4_1.standard.upf"))
@@ -62,8 +62,8 @@ function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], ke
 
     ref_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in bands.eigenvalues])
 
-    klist = physical_k.(Ref(sys), kpoints)
-    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, node_data = klist)
+    klist = RealMLTB.physical_k.(Ref(sys), kpoints)
+    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, graph_data = klist)
 
     predict = model(G2, ps, st)[1]
     predict_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in predict])
