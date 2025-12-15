@@ -14,8 +14,8 @@ np = pyimport("numpy")
 include("../pyscf.jl")
 
 atoms = [Molecules.Atom(14, 0.0, SVector{3}([0.0, 0.0, 0.0]))]
-mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=true)
-mol_sph  = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=false)
+mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=true)
+mol_sph  = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=false)
 
 #    Use `:acsint` for Cartesian to ensure stability
 bs_cart = BasisSet("def2-svp", atoms; spherical=false, lib=:acsint)

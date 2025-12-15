@@ -26,8 +26,8 @@ V_julia_cart = zeros(bs_cart.nbas, bs_cart.nbas, bs_cart.nbas)
 RealMLTB.EPI_1e3c!(V_julia_cart, bs_cart) 
 
 # Define PySCF molecules for reference (Cartesian and Spherical)
-mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=true)
-mol_sph  = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=false)
+mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=true)
+mol_sph  = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=false)
 
 # Compute numerical reference integrals using PySCF DFT grids
 V_ref_cart = compute_3c_overlap_grid(mol_cart)

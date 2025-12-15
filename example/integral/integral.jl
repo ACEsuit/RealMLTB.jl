@@ -24,6 +24,7 @@ Arguments:
 Returns:
    (T_sph, V_sph, S_sph): Three matrices/tensors, all in normalized spherical basis.
 """
+const ang2bohr = GaussianBasis.Acsint.ang2bohr
 function compute_spherical_AO_integrals(bs_cart::BasisSet)
    if bs_cart.basis[1] isa SphericalShell
       bs_cart = BasisSet(bs_cart.name, bs_cart.atoms; spherical=false, lib=:acsint)
@@ -31,7 +32,7 @@ function compute_spherical_AO_integrals(bs_cart::BasisSet)
    # Reconstruct PySCF Molecule Object
    atom_strs = String[]
    for atom in bs_cart.atoms
-      s = "$(atom.Z) $(atom.xyz[1]) $(atom.xyz[2]) $(atom.xyz[3])"
+      s = "$(atom.Z) $(atom.xyz[1] * ang2bohr) $(atom.xyz[2] * ang2bohr) $(atom.xyz[3] * ang2bohr)"
       push!(atom_strs, s)
    end
    pyscf_atom_str = join(atom_strs, "; ")
@@ -39,9 +40,9 @@ function compute_spherical_AO_integrals(bs_cart::BasisSet)
 
    # Initialize PySCF molecules (Used to get C matrix and Scaling Factors)
    # mol_cart: Used to compute Cartesian normalization factors
-   mol_cart = pyscf.M(atom=pyscf_atom_str, basis=basis_name, unit="Angstrom", cart=true)
+   mol_cart = pyscf.M(atom=pyscf_atom_str, basis=basis_name, cart=true) # unit="Angstrom", 
    # mol_sph:  Used to get the C matrix and serves as the final reference standard
-   mol_sph  = pyscf.M(atom=pyscf_atom_str, basis=basis_name, unit="Angstrom", cart=false)
+   mol_sph  = pyscf.M(atom=pyscf_atom_str, basis=basis_name, cart=false) # unit="Angstrom", 
 
    # Compute Auxiliary Data (C and d_c)
    # Get Transformation Matrix C (Cart -> Sph)

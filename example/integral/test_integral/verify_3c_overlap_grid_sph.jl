@@ -18,8 +18,8 @@ include("../pyscf.jl")
 
 println("=== Spherical Integral Verification (Analytic Transformed vs Grid) ===")
 atoms = [Molecules.Atom(14, 0.0, [0.0, 0.0, 0.0])]
-mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=true)
-mol_sph  = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=false)
+mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=true)
+mol_sph  = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=false)
 
 # Compute numerical reference integrals using PySCF DFT grids
 V_ref_sph = compute_3c_overlap_grid(mol_sph)

@@ -103,20 +103,6 @@ function atom_ao_ranges(bs::BasisSet, Wb)
    return NORB, nat, ao_ranges
 end
 
-function atom_ao_ranges(bs::BasisSet)
-   nao_per_atom = bs.basis_per_atom
-   nat   = bs.natoms
-
-   ao_ranges = Vector{UnitRange{Int}}(undef, nat)
-   offset = 0
-   for i in 1:nat
-      n = nao_per_atom[i]
-      ao_ranges[i] = (offset+1):(offset+n)
-      offset += n
-   end
-   return nao_per_atom[1], nat, ao_ranges
-end
-
 _xyz_key(xyz; digits=10) = (round(xyz[1]; digits), round(xyz[2]; digits), round(xyz[3]; digits))
 
 function shells_per_center(bs)

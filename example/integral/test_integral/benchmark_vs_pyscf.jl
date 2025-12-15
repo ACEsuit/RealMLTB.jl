@@ -22,7 +22,7 @@ nlist = PairList(sys, rcut)
 X     = position(sys, :) 
 X_ang = [ustrip.(Å, r) for r in X]
 mol   = Molecules.Molecule([Molecules.Atom(14, 0.0, X_ang[1]), Molecules.Atom(14, 0.0, X_ang[2])])
-bs_in    = BasisSet("def2-SVP", mol.atoms; spherical=false, lib=:acsint)
+bs_in    = BasisSet("def2-SVP", mol.atoms; spherical=true, lib=:acsint)
 
 # Compute all spherical integrals in one go
 T, V, S = compute_spherical_AO_integrals(bs_in)

@@ -24,7 +24,7 @@ X     = position(sys, :)
 X_ang = [ustrip.(Å, r) for r in X]
 mol   = Molecules.Molecule([Molecules.Atom(14, 0.0, X_ang[1]), Molecules.Atom(14, 0.0, X_ang[2])])
 bs    = BasisSet("def2-SVP", mol.atoms; spherical=false, lib=:acsint)
-lmax, n_channels = lmax_and_nchannels_per_atom(bs)
+lmax, n_channels = RealMLTB.lmax_and_nchannels_per_atom(bs)
 
 model, ps, st = RealMLTB.build_ace_model(n_channels, rcut)
 

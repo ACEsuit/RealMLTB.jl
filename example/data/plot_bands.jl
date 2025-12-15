@@ -65,10 +65,7 @@ function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], ke
 
     ref_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in bands.eigenvalues])
 
-    klist = RealMLTB.physical_k.(Ref(sys), kpoints)
-    new_graph_data = merge(G.graph_data, (; klist = klist))
-
-    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, graph_data = new_graph_data)
+    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, graph_data = merge(G.graph_data, (; klist = RealMLTB.physical_k.(Ref(sys), kpoints))))
 
     predict = model(G2, ps, st)[1]
     predict_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in predict])

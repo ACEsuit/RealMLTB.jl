@@ -13,8 +13,8 @@ include("../pyscf.jl")
 # --- Setup PySCF Environment ---
 pyscf = pyimport("pyscf")
 
-mol_py = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=false)
-mol_py_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=true)
+mol_py = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=false)
+mol_py_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", cart=true)
 
 # Get PySCF Standard Data (Target)
 Spy_sph = mol_py.intor("int1e_ovlp_sph")

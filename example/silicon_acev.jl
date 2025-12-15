@@ -4,9 +4,8 @@ using AtomsBuilder, NeighbourLists
 using Unitful: ustrip, Å
 using Unitful
 using Lux, Random
-using Rotations, WignerD, LinearAlgebra, StaticArrays, Test
+using LinearAlgebra, StaticArrays, Test
 using EquivariantTensors
-using EquivariantTensors.O3: Ctran
 
 include("integral/integral.jl")
 include("utils/build_graph.jl")
@@ -23,11 +22,12 @@ mol   = Molecules.Molecule([Molecules.Atom(14, 0.0, X_ang[1]), Molecules.Atom(14
 bs    = BasisSet("def2-SVP", mol.atoms; spherical=true, lib=:acsint)
 
 NORB  = 2
-model = acev_3c_model(bs, NORB, rcut; Dtot = 9, maxl = 5, ORD = 3)
+# model = simple_3c_model(bs, NORB)
+model = acev_3c_model(bs, NORB, rcut; Dtot = 5, maxl = 5, ORD = 2)
 ps,st = LuxCore.setup(MersenneTwister(1234), model)
 
 kgrid = [3, 4, 5]
-keep_bands    = 4
+keep_bands = 4
 dataset = generate_band_data(sys, kgrid; keep_bands = keep_bands)
 klist = getfield.(dataset, 1)
 λ_ref = getfield.(dataset, 2)
@@ -39,7 +39,5 @@ G = nlist2graph(bs, nlist, sys, klist)
 ps, x_history = train(G, model, ps, st, keep_bands, λ_ref; iterations = 3000)
 error         = RMSE(G, λ_ref, model, ps, st; keep_bands = keep_bands)
 
-λ_pred,  = model(G, ps, st)
-λ_pred = getindex.(λ_pred, Ref(1:keep_bands))
-
 compute_and_save_bandstructures(sys, model, ps, st; kgrid = kgrid, keep_bands = keep_bands)
+

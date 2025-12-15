@@ -9,12 +9,8 @@ using RealMLTB
 using SparseArrays 
 
 function compute_pair_spherical_AO_integrals(bs, R_bohr)
-   if bs.basis[1] isa SphericalShell
-      bs = BasisSet(bs.name, bs.atoms; spherical=false, lib=:acsint)
-   end
-   molR_list = [bs.atoms...] # Copy original atoms
+   molR_list = [bs.atoms...]
    for atoms in bs.atoms
-      # Shift atoms by R
       atoms_R = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ RealMLTB.ang2bohr)
       push!(molR_list, atoms_R)
    end
@@ -32,9 +28,12 @@ function compute_pair_spherical_AO_integrals(bs, R_bohr)
    return T_pair_block, V_pair_block, S_pair_block
 end
 
+
 function nlist2graph(bs, nlist, sys, klist)
    if bs.basis[1] isa SphericalShell
-      bs = BasisSet(bs.name, bs.atoms; spherical=false, lib=:acsint)
+      bs_cart = BasisSet(bs.name, bs.atoms; spherical=false, lib=:acsint)
+   else 
+      bs_cart = bs
    end
    X = position(sys, :)
    ii = copy(nlist.i)
@@ -49,36 +48,32 @@ function nlist2graph(bs, nlist, sys, klist)
    Vlist = []
    Slist = []
    idx = 0
-
-   # Iterate over atoms in the system
    for n = 1:length(sys)
       neigs, Rs = NeighbourLists.neigs(nlist, n)
       for m = 1:length(neigs)
          idx += 1
-         # Calculate displacement vector R in Bohr
          Rcell[idx] = (Rs[m] - UnitfulAtomic.ustrip.(X[neigs[m]] - X[n])) .* RealMLTB.ang2bohr
          if norm(Rcell[idx]) == 0
-            T_pair, V_pair, S_pair = compute_spherical_AO_integrals(bs)
+            T_pair, V_pair, S_pair = compute_spherical_AO_integrals(bs_cart)
          else
-            T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals(bs, Rcell[idx])
+            T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals(bs_cart, Rcell[idx])
          end
-         
          push!(Tlist, T_pair)
          push!(Vlist, V_pair)
          push!(Slist, S_pair)
       end
    end
-   
    X_ij = [ (𝐫 = 𝐫, s0 = si, s1 = sj, rij = rij, t = t, v = v, s = s) for (𝐫, si, sj, rij, t, v, s) in zip(R_ij, S_i, S_j, Rcell, Tlist, Vlist, Slist) ]
    
-   klist = RealMLTB.physical_k.(Ref(sys), klist)
-   
    T, V, S = compute_spherical_AO_integrals(bs)
+
    klist = RealMLTB.physical_k.(Ref(sys), klist)
    G = EquivariantTensors.ETGraph(ii, jj; edge_data = X_ij, graph_data = (klist = klist, t = T, v = V, s = S))
    @assert G.first == first
+
    return G 
-end
+end 
+
 
 
 
