@@ -39,19 +39,22 @@ function _construct_integral_rrule_common(Wv, Wb, T_pair, V_pair_raw, S_pair)
       # S = Wb * S_pair * Wb'
       ΔWb_S = ΔS * Wb * S_pair' + ΔS' * Wb * S_pair
 
-      Wb̄ = ΔWb_H + ΔWb_S
+      Wb̄ = real.(ΔWb_H + ΔWb_S)
+      # Wb̄ = ΔWb_H + ΔWb_S
 
       # dL/dA = Wb' * ΔH * Wb
-      ΔA = Wb' * ΔH * Wb
+      ΔA = real.(Wb' * ΔH * Wb)
+      # ΔA = Wb' * ΔH * Wb
 
-      # A = -0.5*T_pair + V_pair
+      # A = T_pair + V_pair
       ΔV = ΔA
 
       # V_pair = reshape(M * Wv, nbas, nbas)
       # y = M * Wv, V = reshape(y, nbas, nbas)
       # ⇒ ∂L/∂Wv = M' * vec(ΔV)
       Δy  = vec(ΔV)
-      Wv̄ = M' * Δy
+      Wv̄ = real.(M' * Δy)
+      # Wv̄ = M' * Δy
 
       return NoTangent(),  # 
                Wv̄,           # Wv
