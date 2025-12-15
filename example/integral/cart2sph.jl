@@ -182,8 +182,6 @@ function cart2sph(l)
 end
 
 function cart2sph_coeff(bs::BasisSet)
-    @assert bs.lib isa GaussianBasis.ACSint
-
     ls = basis_angular.(bs.basis)
     max_l = maximum(ls)
     c2s_l = [cart2sph(l) for l in 0:max_l]
