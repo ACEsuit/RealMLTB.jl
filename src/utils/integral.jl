@@ -1,3 +1,6 @@
+# Implements differentiable construction of Hamiltonian and Overlap matrices from raw integrals, 
+# along with basis set indexing and channel helpers.
+
 function _construct_integral_core(Wv, Wb, T_pair, V_pair_raw, S_pair)
    nbas = size(V_pair_raw, 1)
    M      = reshape(V_pair_raw, nbas^2, nbas)
@@ -111,83 +114,44 @@ function atom_ao_ranges(bs::BasisSet)
    return nao_per_atom[1], nat, ao_ranges
 end
 
-function generate_λ(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
-   L = cholesky(S).L           # S = LLᵀ
-   A = L \ (H / L')            # i.e., A = L⁻¹ H L⁻ᵀ
-   AA = (A + A')/2
-   λ = GenericLinearAlgebra.eigen(AA).values
-   return λ
-end
+_xyz_key(xyz; digits=10) = (round(xyz[1]; digits), round(xyz[2]; digits), round(xyz[3]; digits))
 
-function generate_λ(Hlist::AbstractVector{TH}, Slist::AbstractVector{TS}) where {TH, TS}
-   λlist = [generate_λ(Hlist[i], Slist[i]) for i in 1:length(Hlist)]
-   return λlist
-end
+function shells_per_center(bs)
+   shells = bs.basis
+   groups = Dict{NTuple{3,Float64}, Vector{eltype(shells)}}()
+   order  = NTuple{3,Float64}[]
 
-
-# helpers for graph
-
-using NeighbourLists
-using EquivariantTensors
-using UnitfulAtomic
-using AtomsBase
-
-function get_lattice(sys)
-   return UnitfulAtomic.austrip.(stack(cell_vectors(sys)))
-end
-
-function fractional_coordinates(sys)
-   lattice = UnitfulAtomic.austrip.(stack(cell_vectors(sys)))
-   positions = map(sys) do atom
-      coordinate = zeros(Float64, 3)
-      coordinate[1:3] = lattice[1:3, 1:3] \ Float64.(austrip.(position(atom)))
-      SVector{3, Float64}(coordinate)
+   for sh in shells
+      key = _xyz_key(sh.atom.xyz)
+      if !haskey(groups, key)
+         groups[key] = eltype(shells)[]
+         push!(order, key)
+      end
+      push!(groups[key], sh)
    end
-   return positions
+   return order, groups
 end
 
-function reciprocal_lattice(lattice)
-   return 2π * SMatrix{3,3}(inv(lattice)')
+function shells_for_atom(bs, atom_index::Int)
+   order, groups = shells_per_center(bs)
+   key = order[atom_index]
+   return groups[key], key
 end
 
-function physical_k(sys, k_reduced::SVector{3, <:Real})
-   lattice = get_lattice(sys)
-   G_basis = reciprocal_lattice(lattice)
-   return G_basis * k_reduced
-end
-
-function nlist2graph(bs, nlist, sys, klist)
-   X = position(sys, :)
-   ii = copy(nlist.i)
-   jj = copy(nlist.j)
-   first = copy(nlist.first) 
-   R_ij = [ NeighbourLists._getR(nlist, n) for n = 1:length(ii) ] 
-   S_i = [ NeighbourLists.AtomsBase.species(sys, i) for i in ii ] 
-   S_j = [ NeighbourLists.AtomsBase.species(sys, j) for j in jj ]
-
-   Rcell = zeros(SVector{3, Float64}, first[end] - 1)
-   Tlist = []
-   Vlist = []
-   Slist = []
-   idx = 0
-   for n = 1:length(sys)
-      neigs, Rs = NeighbourLists.neigs(nlist, n)
-      for m = 1:length(neigs)
-         idx += 1
-         Rcell[idx] = (Rs[m] - UnitfulAtomic.ustrip.(X[neigs[m]] - X[n])) .* ang2bohr
-         T_pair, V_pair, S_pair = compute_pair_AO_integrals(bs, Rcell[idx])
-         push!(Tlist, T_pair)
-         push!(Vlist, V_pair)
-         push!(Slist, S_pair)
+function n_channels_from_shells(shells; lmax::Int=2)
+   counts = zeros(Int, lmax + 1)
+   for sh in shells
+      L = sh.l
+      if 0 <= L <= lmax
+         counts[L+1] += 1
       end
    end
-   X_ij = [ (𝐫 = 𝐫, s0 = si, s1 = sj, rij = rij, t = t, v = v, s = s) for (𝐫, si, sj, rij, t, v, s) in zip(R_ij, S_i, S_j, Rcell, Tlist, Vlist, Slist) ]
-   
-   T, V, S = compute_AO_integrals(bs)
+   return Tuple(counts)
+end
 
-   klist = physical_k.(Ref(sys), klist)
-   G = EquivariantTensors.ETGraph(ii, jj; edge_data = X_ij, graph_data = (klist = klist, t = T, v = V, s = S))
-   @assert G.first == first
-
-   return G 
-end 
+function lmax_and_nchannels_per_atom(bs, atom_index::Int=1)
+   lmax = maximum(sh.l for sh in bs.basis)
+   shells, center = shells_for_atom(bs, atom_index)
+   n_channels = n_channels_from_shells(shells; lmax=lmax)
+   return lmax, n_channels
+end

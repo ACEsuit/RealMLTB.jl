@@ -1,3 +1,6 @@
+# Compares the DFT reference band structure 
+# against the ML model predictions along high-symmetry paths.
+
 using Plots
 using DFTK
 using UnitfulAtomic
@@ -63,7 +66,9 @@ function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], ke
     ref_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in bands.eigenvalues])
 
     klist = RealMLTB.physical_k.(Ref(sys), kpoints)
-    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, graph_data = klist)
+    new_graph_data = merge(G.graph_data, (; klist = klist))
+
+    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, graph_data = new_graph_data)
 
     predict = model(G2, ps, st)[1]
     predict_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in predict])

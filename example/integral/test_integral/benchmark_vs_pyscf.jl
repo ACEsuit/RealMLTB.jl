@@ -1,3 +1,6 @@
+# Verifies the numerical accuracy of the spherical integral transformation pipeline 
+# by comparing computed S, T, and V tensors against PySCF reference values.
+
 using PyCall
 using LinearAlgebra
 using GaussianBasis

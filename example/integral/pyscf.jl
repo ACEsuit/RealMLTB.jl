@@ -1,9 +1,14 @@
+# Core functions for converting integrals 
+# between Cartesian and Spherical bases, 
+# handling normalization scaling between GaussianBasis.jl and PySCF, 
+# and performing tensor contractions.
+
 using LinearAlgebra
 using PyCall
 using GaussianBasis
 using Molecules
 
-# --- 1. Normalization Factor Calculation ---
+# --- Normalization Factor Calculation ---
 """
     compute_scaling_factors(S_target, S_source)
 
@@ -21,7 +26,7 @@ function compute_scaling_factors(S_target::AbstractMatrix, S_source::AbstractMat
     return d
 end
 
-# --- 2. General Matrix Transformation ---
+# --- General Matrix Transformation ---
 """
     transform_matrix(M, L, R)
 
@@ -36,7 +41,7 @@ end
 # Overload: Symmetric transformation (M -> A' M A)
 transform_matrix(M::AbstractMatrix, A::AbstractMatrix) = transform_matrix(M, A, A)
 
-# --- 3. Core Logic: Raw Cartesian -> Raw Spherical ---
+# --- Core Logic: Raw Cartesian -> Raw Spherical ---
 """
     convert_gb_cart_to_sph(M_cart_raw, C_pyscf, d_c, d_s)
 
@@ -49,22 +54,22 @@ function convert_gb_cart_to_sph(
     d_c::AbstractVector,        # Input: Cartesian Scaling Factors (GB->PySCF)
     d_s::AbstractVector         # Input: Spherical Scaling Factors (GB->PySCF)
 )
-    # 1. Cartesian Normalization: M_norm = D_c * M_raw * D_c
+    # Cartesian Normalization: M_norm = D_c * M_raw * D_c
     #    Using broadcasting is faster than matrix multiplication for diagonal scaling
     #    M_norm[i,j] = M_raw[i,j] * d_c[i] * d_c[j]
     M_cart_norm = M_cart_raw .* (d_c * d_c')
     
-    # 2. Cartesian -> Spherical Transform: M_sph_norm = C' * M_cart_norm * C
+    # Cartesian -> Spherical Transform: M_sph_norm = C' * M_cart_norm * C
     M_sph_norm = transform_matrix(M_cart_norm, C_pyscf)
     
-    # 3. Denormalization (Return to GB Raw Spherical standard): M_sph_raw = D_s^-1 * M_sph_norm * D_s^-1
+    # Denormalization (Return to GB Raw Spherical standard): M_sph_raw = D_s^-1 * M_sph_norm * D_s^-1
     #    Equivalent to dividing by the scaling factors
     M_sph_raw = M_sph_norm ./ (d_s * d_s')
     
     return M_sph_raw
 end
 
-# --- 4. 3-Center Integral Tensor Transformation ---
+# --- 3-Center Integral Tensor Transformation ---
 """
     transform_3c_tensor_full(V_cart, C, d_c, d_s)
 
@@ -122,11 +127,11 @@ Args:
     d_c:       Cartesian scaling factors (GB -> PySCF)
 """
 function transform_gb_cart_to_pyscf_sph(M_gb_cart::AbstractMatrix, C::AbstractMatrix, d_c::AbstractVector)
-    # 1. Normalize Cartesian: M_norm = D_c * M_raw * D_c
+    # Normalize Cartesian: M_norm = D_c * M_raw * D_c
     #    Using broadcasting for efficiency: M_ij * d_i * d_j
     M_cart_norm = M_gb_cart .* (d_c * d_c')
     
-    # 2. Transform to Spherical: M_sph = C' * M_cart_norm * C
+    # Transform to Spherical: M_sph = C' * M_cart_norm * C
     #    Note: (C' * M) * C is generally faster
     M_pyscf_sph = C' * M_cart_norm * C
     
@@ -135,17 +140,17 @@ end
 
 # --- Core Technique: Use DFT Grid for Numerical Reference Integration ---
 function compute_3c_overlap_grid(mol)
-    # 1. Generate high-precision integration grid (Level 3 or 4 is usually sufficient)
+    # Generate high-precision integration grid (Level 3 or 4 is usually sufficient)
     grids = dft.gen_grid.Grids(mol)
     grids.level = 4 
     grids.build()
     
-    # 2. Evaluate Atomic Orbitals (AO) on grid points. Shape: (N_grid, N_basis)
+    # Evaluate Atomic Orbitals (AO) on grid points. Shape: (N_grid, N_basis)
     #    Note: PySCF returns normalized AOs by default!
     ao_value = mol.eval_gto("GTOval", grids.coords)
     weights = grids.weights
     
-    # 3. Perform numerical integration: sum_g w_g * phi_i * phi_j * phi_k
+    # Perform numerical integration: sum_g w_g * phi_i * phi_j * phi_k
     #    Use numpy.einsum for efficient tensor contraction.
     #    Formula: V[i,j,k] = sum(g) weights[g] * ao[g,i] * ao[g,j] * ao[g,k]
     

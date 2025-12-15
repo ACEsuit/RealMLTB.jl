@@ -1,3 +1,7 @@
+# Verifies the accuracy of the full Cartesian-to-Spherical transformation pipeline 
+# for 3-center integrals by comparing analytic Julia results 
+# against PySCF numerical grid integration.
+
 using PyCall
 using LinearAlgebra
 using GaussianBasis

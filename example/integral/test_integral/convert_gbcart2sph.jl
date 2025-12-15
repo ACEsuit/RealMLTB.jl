@@ -1,3 +1,6 @@
+# Verifies the correctness of integral transformations (Cartesian to Spherical) 
+# and normalization scaling between GaussianBasis.jl and PySCF using 1-electron integrals (S, T).
+
 using PyCall
 using LinearAlgebra
 using GaussianBasis

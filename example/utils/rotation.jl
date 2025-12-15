@@ -1,3 +1,6 @@
+# Tests that both the ML model outputs and the constructed Hamiltonian matrices respect O(3) symmetry, 
+# explicitly handling Wigner-D rotations and PySCF-specific basis ordering.
+
 using Lux, Random
 using Rotations, WignerD, LinearAlgebra, StaticArrays, Test
 using EquivariantTensors.O3: Ctran
@@ -84,48 +87,6 @@ function test_equivariance(model, ps, st, G; tol=1e-5)
     println("====== Test Passed ======\n")
 end
 
-_xyz_key(xyz; digits=10) = (round(xyz[1]; digits), round(xyz[2]; digits), round(xyz[3]; digits))
-
-function shells_per_center(bs)
-    shells = bs.basis
-    groups = Dict{NTuple{3,Float64}, Vector{eltype(shells)}}()
-    order  = NTuple{3,Float64}[]
-
-    for sh in shells
-        key = _xyz_key(sh.atom.xyz)
-        if !haskey(groups, key)
-            groups[key] = eltype(shells)[]
-            push!(order, key)
-        end
-        push!(groups[key], sh)
-    end
-    return order, groups
-end
-
-function shells_for_atom(bs, atom_index::Int)
-    order, groups = shells_per_center(bs)
-    key = order[atom_index]
-    return groups[key], key
-end
-
-function n_channels_from_shells(shells; lmax::Int=2)
-    counts = zeros(Int, lmax + 1)
-    for sh in shells
-        L = sh.l
-        if 0 <= L <= lmax
-            counts[L+1] += 1
-        end
-    end
-    return Tuple(counts)
-end
-
-function lmax_and_nchannels_per_atom(bs, atom_index::Int=1)
-    lmax = maximum(sh.l for sh in bs.basis)
-    shells, center = shells_for_atom(bs, atom_index)
-    n_channels = n_channels_from_shells(shells; lmax=lmax)
-    return lmax, n_channels
-end
-
 function rotate_basis_set(bs_orig::BasisSet, Q)
     new_atoms = map(bs_orig.atoms) do atom
         new_xyz = Q * atom.xyz
@@ -171,7 +132,7 @@ function test_V_pair_equivariance(model, ps, st, G, bs_cart_orig; tol=1e-5)
     
     # Computing Original V_pair
     val_orig, _ = model(G, ps, st)
-    Wv_orig = assemble_Wv(val_orig)
+    Wv_orig = RealMLTB.assemble_Wv(val_orig)
     
     _, V_pair_raw, _ = compute_spherical_AO_integrals(bs_cart_orig)
     nbas = size(V_pair_raw, 1)
@@ -188,7 +149,7 @@ function test_V_pair_equivariance(model, ps, st, G, bs_cart_orig; tol=1e-5)
     bs_cart_rot = rotate_basis_set(bs_cart_orig, Q_mat) 
     
     val_rot, _ = model(G_rot, ps, st)
-    Wv_rot = assemble_Wv(val_rot)
+    Wv_rot = RealMLTB.assemble_Wv(val_rot)
 
     _, V_pair_raw, _ = compute_spherical_AO_integrals(bs_cart_rot)
     nbas = size(V_pair_raw, 1)

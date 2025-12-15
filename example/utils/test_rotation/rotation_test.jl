@@ -1,3 +1,7 @@
+# Verifies that both the ACE model predictions 
+# and the computed pair integrals respect rotational symmetry 
+# on a Silicon bulk system.
+
 using RealMLTB
 using GaussianBasis, Molecules
 using AtomsBuilder, NeighbourLists
@@ -10,9 +14,7 @@ using EquivariantTensors.O3: Ctran
 
 include("../../integral/integral.jl")
 include("../rotation.jl")
-include("../ace_model.jl")
 include("../build_graph.jl")
-include("../assemble.jl")
 
 rcut  = 12.5u"Å"
 sys   = bulk(:Si)
@@ -24,7 +26,7 @@ mol   = Molecules.Molecule([Molecules.Atom(14, 0.0, X_ang[1]), Molecules.Atom(14
 bs    = BasisSet("def2-SVP", mol.atoms; spherical=false, lib=:acsint)
 lmax, n_channels = lmax_and_nchannels_per_atom(bs)
 
-model, ps, st = build_ace_model(n_channels, rcut)
+model, ps, st = RealMLTB.build_ace_model(n_channels, rcut)
 
 klist = []
 G = nlist2graph(bs, nlist, sys, klist)

@@ -1,3 +1,6 @@
+# Verifies that raw Cartesian integrals (S, T) from GaussianBasis.jl 
+# can be accurately transformed to match PySCF's normalized spherical standard.
+
 using PyCall
 using LinearAlgebra
 using GaussianBasis

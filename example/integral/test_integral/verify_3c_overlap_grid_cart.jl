@@ -1,3 +1,6 @@
+# Verifies the accuracy of analytic Cartesian 3-center integrals from Julia 
+# by comparing them against numerical grid-based integration from PySCF.
+
 using PyCall
 using LinearAlgebra
 using GaussianBasis

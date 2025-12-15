@@ -1,3 +1,6 @@
+# Data Generation 
+# Computes reference eigenvalues (band structure) for training using DFTK.
+
 using UnitfulAtomic, Unitful
 using DFTK
 using StaticArrays

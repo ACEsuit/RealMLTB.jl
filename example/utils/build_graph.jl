@@ -1,3 +1,5 @@
+# NOTE: This script is kept external to RealMLTB to isolate the PyCall dependency.
+
 using UnitfulAtomic
 using PyCall
 using LinearAlgebra
@@ -7,6 +9,9 @@ using RealMLTB
 using SparseArrays 
 
 function compute_pair_spherical_AO_integrals(bs, R_bohr)
+   if bs.basis[1] isa SphericalShell
+      bs = BasisSet(bs.name, bs.atoms; spherical=false, lib=:acsint)
+   end
    molR_list = [bs.atoms...] # Copy original atoms
    for atoms in bs.atoms
       # Shift atoms by R
@@ -28,6 +33,9 @@ function compute_pair_spherical_AO_integrals(bs, R_bohr)
 end
 
 function nlist2graph(bs, nlist, sys, klist)
+   if bs.basis[1] isa SphericalShell
+      bs = BasisSet(bs.name, bs.atoms; spherical=false, lib=:acsint)
+   end
    X = position(sys, :)
    ii = copy(nlist.i)
    jj = copy(nlist.j)
