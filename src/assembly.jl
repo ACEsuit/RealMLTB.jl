@@ -15,7 +15,7 @@ function (l::AsmTrip2Dense)(G_vH_vS, ps, st)   # (G, vH, vS)
    G = G_vH_vS[1]
    vH = G_vH_vS[2]
    vS = G_vH_vS[3]
-   klist = G.graph_data
+   klist = getfield(G.graph_data, :klist)
    return _assemble_dense(G, vH, vS, klist), st 
 end
 

@@ -6,8 +6,8 @@ using Unitful: ustrip, Å
 using LuxCore
 using Random
 
-include("utils/generate_data.jl")
-include("utils/plot_bands.jl")
+include("data/generate_data.jl")
+include("data/plot_bands.jl")
 
 rcut  = 12.5u"Å"
 sys   = bulk(:Si)

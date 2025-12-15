@@ -6,9 +6,10 @@ using RealMLTB
 
 const pyscf = pyimport("pyscf")
 const np = pyimport("numpy")
+const dft = pyimport("pyscf.dft")
 
 """
-    compute_spherical_integrals_from_cart(bs_cart::BasisSet)
+    compute_spherical_AO_integrals(bs_cart::BasisSet)
 
 Takes a Cartesian BasisSet from Julia, automatically calls PySCF to retrieve 
 transformation matrices and normalization factors, and returns Spherical integrals 
@@ -20,7 +21,7 @@ Arguments:
 Returns:
     (S_sph, T_sph, V_sph): Three matrices/tensors, all in normalized spherical basis.
 """
-function compute_spherical_integrals_from_cart(bs_cart::BasisSet)
+function compute_spherical_AO_integrals(bs_cart::BasisSet)
     # ==========================================
     # 1. Reconstruct PySCF Molecule Object
     # ==========================================
@@ -111,5 +112,5 @@ function compute_spherical_integrals_from_cart(bs_cart::BasisSet)
     # Restore order (i, j, k)
     V_sph = permutedims(V_tmp3, (2, 3, 1))
 
-    return S_sph, T_sph, V_sph
+    return T_sph, V_sph, S_sph
 end

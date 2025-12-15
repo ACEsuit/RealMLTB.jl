@@ -9,7 +9,7 @@ pyscf = pyimport("pyscf")
 dft = pyimport("pyscf.dft")
 np = pyimport("numpy")
 
-include("utils/pyscf.jl")
+include("../pyscf.jl")
 
 
 println("=== Cartesian Integral Verification (Analytic Transformed vs Grid) ===")

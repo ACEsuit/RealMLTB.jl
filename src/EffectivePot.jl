@@ -195,19 +195,18 @@ using Molecules
 
 function compute_pair_AO_integrals(bs, R_bohr)
     molR_list = [bs.atoms...]
-    nbas = bs.nbas
     for atoms in bs.atoms
         atoms_R = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
         push!(molR_list, atoms_R)
     end
 
     bs_pair = BasisSet(bs.name, molR_list; spherical=false, lib=:acsint)
-    S_pair = overlap(bs_pair)[1:nbas, nbas+1:2*nbas]
-    T_pair = kinetic(bs_pair)[1:nbas, nbas+1:2*nbas]
+    T, V, S = compute_AO_integrals(bs_pair)
 
-    out = zeros(bs_pair.nbas, bs_pair.nbas, bs_pair.nbas)
-    EPI_1e3c!(out, bs_pair)
-    V_pair = out[1:nbas, 1:nbas, nbas+1:2*nbas]
+    nbas = div(size(T, 1), 2)
+    S_pair = S[1:nbas, nbas+1:2*nbas]
+    T_pair = T[1:nbas, nbas+1:2*nbas]
+    V_pair = V[1:nbas, 1:nbas, nbas+1:2*nbas]
     return T_pair, V_pair, S_pair
 end
 

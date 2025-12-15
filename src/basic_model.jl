@@ -44,6 +44,9 @@ function _simple3center_triplet(G, basis::BasisSet, Wv::AbstractVector, Wb::Abst
    Tlist = getfield.(G.edge_data, :t)
    Vlist = getfield.(G.edge_data, :v)
    Slist = getfield.(G.edge_data, :s)
+   T = getfield(G.graph_data, :t)
+   V = getfield(G.graph_data, :v)
+   S = getfield(G.graph_data, :s)
    NORB, nat, ao_ranges = atom_ao_ranges(basis, Wb)
    TV = eltype(Wv)
 
@@ -55,7 +58,7 @@ function _simple3center_triplet(G, basis::BasisSet, Wv::AbstractVector, Wb::Abst
    vH = [ _init_mat() for _ = 1:nnz ]
    vS = [ _init_mat() for _ = 1:nnz ]
 
-   H_AO_onsite, S_AO_onsite = construct_integral(basis, Wv, Wb)
+   H_AO_onsite, S_AO_onsite = construct_integral(Wv, Wb, T, V, S)
    for i = 1:nat
       Hij, Sij = siteblock(H_AO_onsite, S_AO_onsite, ao_ranges, i, i)
       vH[i] = SMatrix{NORB, NORB, TV}(Hij)
@@ -65,7 +68,7 @@ function _simple3center_triplet(G, basis::BasisSet, Wv::AbstractVector, Wb::Abst
    idx = nat
    for (i, j, T_pair, V_pair_raw, S_pair) in zip(ii, jj, Tlist, Vlist, Slist)
       idx += 1
-      H_AO_offsite, S_AO_offsite = construct_integral(basis, Wv, Wb, T_pair, V_pair_raw, S_pair)
+      H_AO_offsite, S_AO_offsite = construct_integral(Wv, Wb, T_pair, V_pair_raw, S_pair)
       Hij, Sij = siteblock(H_AO_offsite, S_AO_offsite, ao_ranges, i, j)
       vH[idx] = SMatrix{NORB, NORB, TV}(Hij)
       vS[idx] = SMatrix{NORB, NORB, TV}(Sij)

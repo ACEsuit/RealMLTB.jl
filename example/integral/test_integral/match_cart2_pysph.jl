@@ -8,7 +8,7 @@ using Test
 pyscf = pyimport("pyscf")
 np = pyimport("numpy")
 
-include("utils/pyscf.jl") 
+include("../pyscf.jl")
 
 atoms = [Molecules.Atom(14, 0.0, SVector{3}([0.0, 0.0, 0.0]))]
 mol_cart = pyscf.M(atom="Si 0 0 0", basis="def2-svp", unit="Angstrom", cart=true)

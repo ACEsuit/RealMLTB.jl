@@ -5,7 +5,7 @@ using Molecules
 using StaticArrays
 using Test
 
-include("utils/pyscf.jl")
+include("../pyscf.jl")
 
 # --- Setup PySCF Environment ---
 pyscf = pyimport("pyscf")

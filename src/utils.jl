@@ -1,5 +1,5 @@
-function _construct_integral_core(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-   nbas = bs.nbas
+function _construct_integral_core(Wv, Wb, T_pair, V_pair_raw, S_pair)
+   nbas = size(V_pair_raw, 1)
    M      = reshape(V_pair_raw, nbas^2, nbas)
    V_pair = reshape(M * Wv, nbas, nbas)
 
@@ -9,22 +9,12 @@ function _construct_integral_core(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
    return H, S
 end
 
-function construct_integral(bs, Wv, Wb)
-   T_pair, V_pair_raw, S_pair = compute_AO_integrals(bs)
-   return _construct_integral_core(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
+function construct_integral(Wv, Wb, T_pair, V_pair_raw, S_pair)
+   return _construct_integral_core(Wv, Wb, T_pair, V_pair_raw, S_pair)
 end
 
-function construct_integral(bs, Wv, Wb, Rij)
-   T_pair, V_pair_raw, S_pair = compute_pair_AO_integrals(bs, Rij)
-   return _construct_integral_core(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-end
-
-function construct_integral(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-   return _construct_integral_core(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-end
-
-function _construct_integral_primal(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-   nbas   = bs.nbas
+function _construct_integral_primal(Wv, Wb, T_pair, V_pair_raw, S_pair)
+   nbas = size(V_pair_raw, 1)
    M      = reshape(V_pair_raw, nbas^2, nbas)
    V_pair = reshape(M * Wv, nbas, nbas)
 
@@ -34,8 +24,8 @@ function _construct_integral_primal(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
    return H, S, A, M
 end
 
-function _construct_integral_rrule_common(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-   H, S, A, M = _construct_integral_primal(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
+function _construct_integral_rrule_common(Wv, Wb, T_pair, V_pair_raw, S_pair)
+   H, S, A, M = _construct_integral_primal(Wv, Wb, T_pair, V_pair_raw, S_pair)
 
    function pullback_common(ΔΩ)
       ΔH, ΔS = ΔΩ
@@ -61,7 +51,6 @@ function _construct_integral_rrule_common(bs, Wv, Wb, T_pair, V_pair_raw, S_pair
       Wv̄ = M' * Δy
 
       return NoTangent(),  # 
-               NoTangent(),  # bs
                Wv̄,           # Wv
                Wb̄,           # Wb
                NoTangent(),  # T_pair
@@ -73,51 +62,13 @@ function _construct_integral_rrule_common(bs, Wv, Wb, T_pair, V_pair_raw, S_pair
 end
 
 function ChainRulesCore.rrule(::typeof(construct_integral),
-               bs,
-               Wv::AbstractVector,
-               Wb::AbstractMatrix)
-
-   T_pair, V_pair_raw, S_pair = compute_AO_integrals(bs)
-
-   (H_S, pullback_common) =
-        _construct_integral_rrule_common(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-
-   function pullback(ΔΩ)
-      _f̄, bs̄, Wv̄, Wb̄, T̄, V̄, S̄ = pullback_common(ΔΩ)
-      return NoTangent(), bs̄, Wv̄, Wb̄
-   end
-
-   return H_S, pullback
-end
-
-function ChainRulesCore.rrule(::typeof(construct_integral),
-               bs,
                Wv::AbstractVector,
                Wb::AbstractMatrix,
                T_pair,
                V_pair_raw,
                S_pair)
 
-    return _construct_integral_rrule_common(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-end
-
-function ChainRulesCore.rrule(::typeof(construct_integral),
-               bs,
-               Wv::AbstractVector,
-               Wb::AbstractMatrix,
-               Rij)
-
-   T_pair, V_pair_raw, S_pair = compute_pair_AO_integrals(bs, Rij)
-
-   (H_S, pullback_common) =
-      _construct_integral_rrule_common(bs, Wv, Wb, T_pair, V_pair_raw, S_pair)
-
-   function pullback(ΔΩ)
-      _f̄, bs̄, Wv̄, Wb̄, T̄, V̄, S̄ = pullback_common(ΔΩ)
-      return NoTangent(), bs̄, Wv̄, Wb̄, NoTangent()
-   end
-
-   return H_S, pullback
+    return _construct_integral_rrule_common(Wv, Wb, T_pair, V_pair_raw, S_pair)
 end
 
 function siteblock(H_AO, S_AO, 
@@ -232,8 +183,10 @@ function nlist2graph(bs, nlist, sys, klist)
    end
    X_ij = [ (𝐫 = 𝐫, s0 = si, s1 = sj, rij = rij, t = t, v = v, s = s) for (𝐫, si, sj, rij, t, v, s) in zip(R_ij, S_i, S_j, Rcell, Tlist, Vlist, Slist) ]
    
+   T, V, S = compute_AO_integrals(bs)
+
    klist = physical_k.(Ref(sys), klist)
-   G = EquivariantTensors.ETGraph(ii, jj; edge_data = X_ij, graph_data = klist)
+   G = EquivariantTensors.ETGraph(ii, jj; edge_data = X_ij, graph_data = (klist = klist, t = T, v = V, s = S))
    @assert G.first == first
 
    return G 
