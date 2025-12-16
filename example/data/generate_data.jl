@@ -7,6 +7,10 @@ using StaticArrays
 using AtomsBase
 using PseudoPotentialData
 using GaussianBasis
+using Unitful: Å
+using AtomsBuilder: rattle!, _set_position
+using AtomsBase
+using LinearAlgebra
 
 function extract_k_and_eigenvalues(basis, scfres; keep_bands::Int = 4)
     k_list = [SVector{3,Float64}(kp.coordinate) for kp in basis.kpoints]
@@ -62,4 +66,29 @@ function generate_band_data(sys, kgrid; keep_bands::Int = 4)
         push!(dataset, (k, λ))
     end
     return dataset
+end
+
+function perturb(sys; ϵ = 0.01)
+    # Deep copy the system to avoid modifying the original
+    sys_pert = deepcopy(sys)
+    new_vectors = sys_pert.cell.cell_vectors
+
+    # Apply stretch and rotation to the cell and particle positions
+    stretch = diagm(1 .+ ϵ * (2rand(3) .- 1))
+    # Update cell vectors
+    new_vectors = ntuple(i -> stretch * new_vectors[i], 3) 
+    for i in eachindex(sys_pert.particles)
+        p = sys_pert.particles[i]
+        sys_pert.particles[i] = _set_position(p, stretch * p.position)
+    end
+
+    rattle!(sys_pert, ϵ)
+
+    # Return a new FlexibleSystem with the perturbed configuration
+    return AtomsBase.FlexibleSystem(
+        sys_pert.particles;
+        cell_vectors = new_vectors,
+        periodicity = sys_pert.cell.periodicity,
+        data = sys_pert.data,
+    )
 end
