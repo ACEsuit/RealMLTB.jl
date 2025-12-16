@@ -68,7 +68,7 @@ function generate_band_data(sys, kgrid; keep_bands::Int = 4)
     return dataset
 end
 
-function perturb(sys; ϵ = 0.01)
+function perturb(sys; ϵ = 0.1)
     # Deep copy the system to avoid modifying the original
     sys_pert = deepcopy(sys)
     new_vectors = sys_pert.cell.cell_vectors
@@ -91,4 +91,66 @@ function perturb(sys; ϵ = 0.01)
         periodicity = sys_pert.cell.periodicity,
         data = sys_pert.data,
     )
+end
+
+function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4)
+    λ_ref_list = Vector{Any}(undef, length(syslist))
+    G_list     = Vector{Any}(undef, length(syslist))
+    bs = nothing
+
+    for (i, sys) in enumerate(syslist)
+        nlist = PairList(sys, rcut)
+
+        # positions
+        X     = position(sys, :)
+        X_ang = [ustrip.(u"Å", r) for r in X]
+
+        mol = Molecules.Molecule([
+            Molecules.Atom(14, 0.0, X_ang[j]) for j in eachindex(X_ang)
+        ])
+
+        bs = BasisSet("def2-SVP", mol.atoms; spherical=true, lib=:acsint)
+
+        dataset = generate_data(sys, kgrid; keep_bands=keep_bands)
+        klist   = getfield.(dataset, 1)
+        λ_ref   = getfield.(dataset, 2)
+
+        G = nlist2graph(bs, nlist, sys, klist)
+
+        λ_ref_list[i] = λ_ref
+        G_list[i]     = G
+    end
+
+    return bs, λ_ref_list, G_list
+end
+
+function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4)
+    λ_ref_list = Vector{Any}(undef, length(syslist))
+    G_list     = Vector{Any}(undef, length(syslist))
+    bs = nothing
+    for (i, sys) in enumerate(syslist)
+        nlist = PairList(sys, rcut)
+
+        # positions
+        X     = position(sys, :)
+        X_ang = [ustrip.(u"Å", r) for r in X]
+
+        mol = Molecules.Molecule([
+            Molecules.Atom(14, 0.0, X_ang[j]) for j in eachindex(X_ang)
+        ])
+
+        # Cartesian basis: spherical=false
+        bs = BasisSet("def2-SVP", mol.atoms; spherical=false, lib=:acsint)
+
+        dataset = generate_data(sys, kgrid; keep_bands=keep_bands)
+        klist   = getfield.(dataset, 1)
+        λ_ref   = getfield.(dataset, 2)
+
+        G = RealMLTB.nlist2graph(bs, nlist, sys, klist)
+
+        λ_ref_list[i] = λ_ref
+        G_list[i]     = G
+    end
+
+    return bs, λ_ref_list, G_list
 end
