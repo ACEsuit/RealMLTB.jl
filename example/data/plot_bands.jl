@@ -47,7 +47,7 @@ function compare_bandstructure(band_data::NamedTuple, band_data2::NamedTuple;
     return p
 end
 
-function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], keep_bands = 4)
+function compute_and_save_bandstructures(G, sys, model, ps, st; kgrid = [4,4,4], keep_bands = 4, name = "test01")
     lattice = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
 
@@ -71,5 +71,5 @@ function compute_and_save_bandstructures(sys, model, ps, st; kgrid = [4,4,4], ke
     predict_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in predict])
 
     p = compare_bandstructure(ref_bands, predict_bands)
-    savefig(p, "bandstructure.png")
+    savefig(p, "bandstructure_$(name).png")
 end

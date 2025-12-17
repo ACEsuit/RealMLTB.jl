@@ -13,7 +13,8 @@ end
 
 function LuxCore.initialparameters(rng::AbstractRNG, l::Simple3Center{NORB, NBAS, NATOM}) where {NORB, NBAS, NATOM}
    Wv = glorot_normal(rng, Float64, NBAS)
-   Wb = glorot_normal(rng, Float64, NORB * NATOM, NBAS) 
+   Nb = div(NBAS, NATOM)
+   Wb = glorot_normal(rng, Float64, NORB, Nb)
    return (Wv = Wv, Wb = Wb, )
 end
 
@@ -21,10 +22,10 @@ function LuxCore.initialstates(rng::AbstractRNG, l::Simple3Center{NORB, NBAS, NA
    return (basisset = l.basisset, )
 end
 
-function (l::Simple3Center)(G, ps, st)
+function (l::Simple3Center{NORB, NBAS, NATOM})(G, ps, st) where {NORB, NBAS, NATOM}
    basis = st.basisset
-   Wv = ps.Wv    # parameters for the effective potential 
-   Wb = ps.Wb    # parameters for the basis functions
+   Wv = ps.Wv    # parameters for the effective potential    
+   Wb = kron(Matrix(I, NATOM, NATOM), ps.Wb) # parameters for the basis functions
 
    vH, vS = _3center_triplet(G, basis, Wv, Wb)
    return (G, vH, vS), ps, st
