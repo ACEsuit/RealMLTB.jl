@@ -32,7 +32,7 @@ function generate_data(sys, kgrid; keep_bands::Int = 4)
     lattice = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
     Si = ElementPsp(:Si, PseudoFamily("dojo.nc.sr.lda.v0_4_1.standard.upf"))
-    atoms = [Si, Si]
+    atoms = fill(Si, length(positions))
     model = model_DFT(lattice, atoms, positions;
                           functionals = LDA(), temperature = 0.01)
     basis = PlaneWaveBasis(model; Ecut = 15, kgrid = kgrid)
@@ -51,7 +51,7 @@ function generate_band_data(sys, kgrid; keep_bands::Int = 4)
     lattice = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
     Si = ElementPsp(:Si, PseudoFamily("dojo.nc.sr.lda.v0_4_1.standard.upf"))
-    atoms = [Si, Si]
+    atoms = fill(Si, length(positions))
 
     model = model_DFT(lattice, atoms, positions;
                           functionals = LDA(), temperature = 0.01)
@@ -93,15 +93,14 @@ function perturb(sys; ϵ = 0.1)
     )
 end
 
-function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4)
+function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4, basis_name="def2-TZVP")
     λ_ref_list = Vector{Any}(undef, length(syslist))
     G_list     = Vector{Any}(undef, length(syslist))
     bs = nothing
 
     for (i, sys) in enumerate(syslist)
+        println("====$i-th sys====")
         nlist = PairList(sys, rcut)
-
-        # positions
         X     = position(sys, :)
         X_ang = [ustrip.(u"Å", r) for r in X]
 
@@ -109,7 +108,7 @@ function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4)
             Molecules.Atom(14, 0.0, X_ang[j]) for j in eachindex(X_ang)
         ])
 
-        bs = BasisSet("def2-SVP", mol.atoms; spherical=true, lib=:acsint)
+        bs = BasisSet(basis_name, mol.atoms; spherical=true, lib=:acsint)
 
         dataset = generate_data(sys, kgrid; keep_bands=keep_bands)
         klist   = getfield.(dataset, 1)
@@ -124,14 +123,14 @@ function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4)
     return bs, λ_ref_list, G_list
 end
 
-function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4)
+function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4, basis_name="def2-SVP")
     λ_ref_list = Vector{Any}(undef, length(syslist))
     G_list     = Vector{Any}(undef, length(syslist))
     bs = nothing
+    
     for (i, sys) in enumerate(syslist)
+        println("====$i-th sys====")
         nlist = PairList(sys, rcut)
-
-        # positions
         X     = position(sys, :)
         X_ang = [ustrip.(u"Å", r) for r in X]
 
@@ -139,8 +138,7 @@ function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4)
             Molecules.Atom(14, 0.0, X_ang[j]) for j in eachindex(X_ang)
         ])
 
-        # Cartesian basis: spherical=false
-        bs = BasisSet("def2-SVP", mol.atoms; spherical=false, lib=:acsint)
+        bs = BasisSet(basis_name, mol.atoms; spherical=false, lib=:acsint)
 
         dataset = generate_data(sys, kgrid; keep_bands=keep_bands)
         klist   = getfield.(dataset, 1)
