@@ -8,15 +8,19 @@ using ChainRulesCore
 using ChainRulesCore: NoTangent
 
 
-include("EffectivePot.jl")
+include("utils/EffectivePot.jl")
 include("utils/graph.jl")
 include("utils/integral.jl")
 include("utils/assemble.jl")
-include("ace.jl")
-include("basic_model.jl")
-include("acev_3c_model.jl")
-include("ace3c_model.jl")
-include("assembly.jl")
-include("train.jl")
+include("ace/ace_common.jl")
+include("ace/ace_wv.jl")
+include("ace/ace_wpsi.jl")
+include("model/3c_layers.jl")
+include("model/3c_models.jl")
+include("utils/assembly.jl")
+include("train/train_common.jl")
+include("train/train_single.jl")
+include("train/train_multilevel.jl")
+
 
 end

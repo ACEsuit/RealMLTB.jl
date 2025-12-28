@@ -53,7 +53,7 @@ function nlist2graph(bs, nlist, sys, klist)
       for m = 1:length(neigs)
          idx += 1
          Rcell[idx] = (Rs[m] - UnitfulAtomic.ustrip.(X[neigs[m]] - X[n])) .* RealMLTB.ang2bohr
-         if norm(Rcell[idx]) == 0
+         if norm(Rcell[idx]) < 1e-10
             T_pair, V_pair, S_pair = compute_spherical_AO_integrals(bs_cart)
          else
             T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals(bs_cart, Rcell[idx])

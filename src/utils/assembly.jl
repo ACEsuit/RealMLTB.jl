@@ -19,6 +19,7 @@ function (l::AsmTrip2Dense)(G_vH_vS, ps, st)   # (G, vH, vS)
    return _assemble_dense(G, vH, vS, klist), st 
 end
 
+using Base.Threads
 _indexblock(n::Integer, NORB) = (n-1) * NORB .+ (1:NORB)
 
 function _assemble_dense(G,  # this prevents repeated entries 
@@ -26,10 +27,12 @@ function _assemble_dense(G,  # this prevents repeated entries
                          vS::AbstractVector{<:SMatrix{NORB, NORB, TH}}, 
                          klist::AbstractVector{<:SVector{DIM, TK}}) where {DIM, NORB, TH, TK}
    
-   ii = G.ii; jj = G.jj
+   ii  = G.ii; jj = G.jj
    nat = length(G.first) - 1
+   nk  = length(klist)
    # TODO: need to add Rcell to the graph edges 
-            
+   Rcell = getfield.(G.edge_data, :rij)
+   
    function _init_mat() 
       A = similar(vH, Complex{TH}, (NORB * nat, NORB * nat))
       fill!(A, zero(TH))
@@ -38,42 +41,46 @@ function _assemble_dense(G,  # this prevents repeated entries
 
    # TODO: alternatively we could store this as a 3d tensor, which might 
    #       give us more options when implementing the KA version
-   Hout = [ _init_mat() for i = 1:length(klist) ]
-   Sout = [ _init_mat() for i = 1:length(klist) ]
+   Hout = [ _init_mat() for i = 1:nk ]
+   Sout = [ _init_mat() for i = 1:nk ]
 
-   for i = 1:nat
-      H_ii, S_ii = vH[i], vS[i]
-      Ii = _indexblock(i, NORB)
-      @inbounds for a = 1:NORB, b = 1:NORB
-         for ik = 1:length(klist) 
-            Hout[ik][Ii[a], Ii[b]] += H_ii[a, b]
-            Sout[ik][Ii[a], Ii[b]] += S_ii[a, b]
+   @threads for ik in 1:nk
+      k = klist[ik]
+      H = Hout[ik]
+      S = Sout[ik]
+
+      # on-site blocks: vH[1:nat], vS[1:nat]
+      for i in 1:nat
+         Ii = _indexblock(i, NORB)
+         Hii = vH[i]
+         Sii = vS[i]
+         @inbounds for a in 1:NORB, b in 1:NORB
+            H[Ii[a], Ii[b]] += Hii[a,b]
+            S[Ii[a], Ii[b]] += Sii[a,b]
          end
       end
-   end
-   Rcell = getfield.(G.edge_data, :rij)
-   idx = nat
-   for (i, j, R) in zip(ii, jj, Rcell)
-      Ii, Ij = _indexblock(i, NORB), _indexblock(j, NORB)
-      idx += 1
-      Hij = vH[idx]
-      Sij = vS[idx]
-      
-      @inbounds for a = 1:NORB, b = 1:NORB
-         for (ik, k) in enumerate(klist) 
-            phase = exp(im * dot(k, R))
 
-            Hout[ik][Ii[a], Ij[b]] += Hij[a, b] * phase
-            Sout[ik][Ii[a], Ij[b]] += Sij[a, b] * phase
+      # off-site blocks: vH[nat+1:end]
+      idx = nat
+      for (i, j, R) in zip(ii, jj, Rcell)
+         idx += 1
+         Ii = _indexblock(i, NORB)
+         Ij = _indexblock(j, NORB)
+         Hij = vH[idx]
+         Sij = vS[idx]
+
+         phase = exp(im * dot(k, R))
+
+         @inbounds for a in 1:NORB, b in 1:NORB
+            H[Ii[a], Ij[b]] += Hij[a,b] * phase
+            S[Ii[a], Ij[b]] += Sij[a,b] * phase
          end
       end
-   end
-   for H in Hout
+
       H .= (H .+ H') ./ 2
-   end
-   for S in Sout
       S .= (S .+ S') ./ 2
    end
+
    return Hout, Sout
 end
 
@@ -104,7 +111,7 @@ function ChainRulesCore.rrule(::typeof(_assemble_dense),
 
       function _init_mat() 
          A = similar(vH, TΔ, (NORB, NORB))
-         fill!(A, zero(TH))
+         fill!(A, zero(TΔ))
          return A
       end
 
@@ -114,32 +121,42 @@ function ChainRulesCore.rrule(::typeof(_assemble_dense),
       ΔHsym = [ (ΔHk .+ ΔHk') ./ 2 for ΔHk in ΔHout ]
       ΔSsym = [ (ΔSk .+ ΔSk') ./ 2 for ΔSk in ΔSout ]
 
-      for i in 1:nat
-         idx = i
-         Ii  = _indexblock(i, NORB)
-
+      # --- on-site: idx = 1:nat ---
+      @threads for i in 1:nat
+         Ii = _indexblock(i, NORB)
          @inbounds for a in 1:NORB, b in 1:NORB
+            accH = zero(TΔ)
+            accS = zero(TΔ)
             for ik in 1:length(klist)
-               vH_grad_mat[idx][a, b] += ΔHsym[ik][Ii[a], Ii[b]]
-               vS_grad_mat[idx][a, b] += ΔSsym[ik][Ii[a], Ii[b]]
+               accH += ΔHsym[ik][Ii[a], Ii[b]]
+               accS += ΔSsym[ik][Ii[a], Ii[b]]
             end
+            vH_grad_mat[i][a,b] += accH
+            vS_grad_mat[i][a,b] += accS
          end
       end
 
-      idx = nat
-      for (i, j, R) in zip(ii, jj, Rcell)
+      # --- off-site: idx = nat+1 : nat+length(ii) ---
+      @threads for e in eachindex(ii)
+         i = ii[e]
+         j = jj[e]
+         R = Rcell[e]
+         idx = nat + e
+
          Ii = _indexblock(i, NORB)
          Ij = _indexblock(j, NORB)
-         idx += 1
 
          @inbounds for a in 1:NORB, b in 1:NORB
+            accH = zero(TΔ)
+            accS = zero(TΔ)
             for (ik, k) in enumerate(klist)
-               phase = exp(im * dot(k, R))
+               phase  = exp(im * dot(k, R))
                cphase = conj(phase)
-
-               vH_grad_mat[idx][a, b] += cphase * ΔHsym[ik][Ii[a], Ij[b]]
-               vS_grad_mat[idx][a, b] += cphase * ΔSsym[ik][Ii[a], Ij[b]]
+               accH += cphase * ΔHsym[ik][Ii[a], Ij[b]]
+               accS += cphase * ΔSsym[ik][Ii[a], Ij[b]]
             end
+            vH_grad_mat[idx][a,b] += accH
+            vS_grad_mat[idx][a,b] += accS
          end
       end
 
@@ -149,9 +166,9 @@ function ChainRulesCore.rrule(::typeof(_assemble_dense),
 
       vH̄ = [ _init_smat() for _ = 1:length(vH) ]
       vS̄ = [ _init_smat() for _ = 1:length(vH) ]
-      for i in eachindex(vH)
-         vH̄[i] = SMatrix{NORB, NORB, TΔ}(vH_grad_mat[i])
-         vS̄[i] = SMatrix{NORB, NORB, TΔ}(vS_grad_mat[i])
+      for i in 1:L
+         vH̄[i] = SMatrix{NORB,NORB,TΔ}(vH_grad_mat[i])
+         vS̄[i] = SMatrix{NORB,NORB,TΔ}(vS_grad_mat[i])
       end
 
       return NoTangent(), NoTangent(), vH̄, vS̄, NoTangent()
