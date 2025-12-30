@@ -99,7 +99,8 @@ function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4, basis
     bs = nothing
 
     for (i, sys) in enumerate(syslist)
-        println("====$i-th sys====")
+        println("====$i-th sys begin====")
+        flush(stdout)
         nlist = PairList(sys, rcut)
         X     = position(sys, :)
         X_ang = [ustrip.(u"Å", r) for r in X]
@@ -110,14 +111,20 @@ function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4, basis
 
         bs = BasisSet(basis_name, mol.atoms; spherical=true, lib=:acsint)
 
+        println("====generate_data====")
+        flush(stdout)
         dataset = generate_data(sys, kgrid; keep_bands=keep_bands)
         klist   = getfield.(dataset, 1)
         λ_ref   = getfield.(dataset, 2)
 
+        println("====generate_graph====")
+        flush(stdout)
         G = nlist2graph(bs, nlist, sys, klist)
 
         λ_ref_list[i] = λ_ref
         G_list[i]     = G
+        println("====$i-th sys done====")
+        flush(stdout)
     end
 
     return bs, λ_ref_list, G_list
@@ -129,7 +136,8 @@ function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4, basi
     bs = nothing
     
     for (i, sys) in enumerate(syslist)
-        println("====$i-th sys====")
+        println("====$i-th sys begin====")
+        flush(stdout)
         nlist = PairList(sys, rcut)
         X     = position(sys, :)
         X_ang = [ustrip.(u"Å", r) for r in X]
@@ -140,14 +148,20 @@ function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4, basi
 
         bs = BasisSet(basis_name, mol.atoms; spherical=false, lib=:acsint)
 
+        println("====generate_data====")
+        flush(stdout)
         dataset = generate_data(sys, kgrid; keep_bands=keep_bands)
         klist   = getfield.(dataset, 1)
         λ_ref   = getfield.(dataset, 2)
 
+        println("====generate_graph====")
+        flush(stdout)
         G = RealMLTB.nlist2graph(bs, nlist, sys, klist)
 
         λ_ref_list[i] = λ_ref
         G_list[i]     = G
+        println("====$i-th sys done====")
+        flush(stdout)
     end
 
     return bs, λ_ref_list, G_list

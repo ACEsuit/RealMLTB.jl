@@ -4,6 +4,7 @@
 using Plots
 using DFTK
 using UnitfulAtomic
+using Unitful
 using EquivariantTensors
 using PseudoPotentialData
 
