@@ -57,7 +57,7 @@ function ChainRulesCore.rrule(::typeof(RMSE), Glist, λ_ref_list, model, ps, st;
         
         current_adj_p = zero(p) 
 
-        for i in 1:length(Glist)
+        Threads.@threads for i in 1:length(Glist)
             y_pred_full, pb_model = Zygote.pullback(v -> model(Glist[i], re(v), st)[1], p)
             
             y_grad = [zeros(eltype(p), length(y)) for y in y_pred_full]

@@ -11,8 +11,8 @@ using AtomsBuilder, NeighbourLists
 using Unitful: ustrip, Å
 using Unitful
 
-include("../integral.jl")
-include("../pyscf.jl")
+include("integral_pyscf.jl")
+include("pyscf.jl")
 
 # Prepare the single input: a Cartesian BasisSet
 rcut  = 12.5u"Å"
@@ -25,7 +25,7 @@ mol   = Molecules.Molecule([Molecules.Atom(14, 0.0, X_ang[1]), Molecules.Atom(14
 bs_in    = BasisSet("def2-SVP", mol.atoms; spherical=true, lib=:acsint)
 
 # Compute all spherical integrals in one go
-T, V, S = compute_spherical_AO_integrals(bs_in)
+T, V, S = compute_spherical_AO_integrals_pyscf(bs_in)
 
 atom_strs = String[]
 for atom in bs_in.atoms

@@ -98,8 +98,8 @@ function build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=4, basis
     G_list     = Vector{Any}(undef, length(syslist))
     bs = nothing
 
-    for (i, sys) in enumerate(syslist)
-        println("====$i-th sys begin====")
+    for i in eachindex(syslist)
+        sys = syslist[i]
         flush(stdout)
         nlist = PairList(sys, rcut)
         X     = position(sys, :)
@@ -135,7 +135,8 @@ function build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=4, basi
     G_list     = Vector{Any}(undef, length(syslist))
     bs = nothing
     
-    for (i, sys) in enumerate(syslist)
+    for i in eachindex(syslist)
+        sys = syslist[i]
         println("====$i-th sys begin====")
         flush(stdout)
         nlist = PairList(sys, rcut)

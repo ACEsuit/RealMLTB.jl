@@ -13,7 +13,7 @@ pyscf = pyimport("pyscf")
 dft = pyimport("pyscf.dft")
 np = pyimport("numpy")
 
-include("../pyscf.jl")
+include("pyscf.jl")
 
 
 println("=== Spherical Integral Verification (Analytic Transformed vs Grid) ===")

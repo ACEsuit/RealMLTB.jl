@@ -1,3 +1,52 @@
+# 00_prep_dataset.jl
+# Purpose: build reference data/graphs once, then save to disk (may use Python)
+
+using Pkg
+Pkg.activate(".")
+Pkg.develop(path="..")
+
+using RealMLTB
+using Molecules, GaussianBasis
+using AtomsBuilder, NeighbourLists
+using EquivariantTensors
+using Unitful: ustrip, Å
+using LuxCore
+using Random
+
+using JLD2
+
+include("data/generate_data.jl")
+include("integral/integral.jl")
+include("utils/build_graph.jl")
+
+# -----------------------------
+# 0) dataset list
+# -----------------------------
+syslist = [bulk(:Si); [perturb(bulk(:Si)) for _ in 1:2]]
+#sys_pert = perturb(bulk(:Si))
+sys_pert =  perturb(bulk(:Si, cubic=true))
+
+NORB       = 2
+kgrid      = [3, 4, 5]
+keep_bands = 4
+rcut       = 12.5u"Å"
+
+println("== PREP: build CART ==")
+bs_cart, λ_ref_list_cart, G_list_cart =
+    build_ref_and_graph_lists_cart(syslist, rcut, kgrid; keep_bands=keep_bands, basis_name="def2-SVP")
+
+_, λ_ref_list_cart_pert, G_list_cart_pert =
+    build_ref_and_graph_lists_cart([sys_pert], rcut, kgrid; keep_bands=keep_bands, basis_name="def2-SVP")
+
+println("== PREP: build SPH ==")
+bs_sph, λ_ref_list_sph, G_list_sph =
+    build_ref_and_graph_lists_sph(syslist, rcut, kgrid; keep_bands=keep_bands, basis_name="def2-SVP")
+
+_, _, G_list_sph_pert =
+    build_ref_and_graph_lists_sph([sys_pert], rcut, kgrid; keep_bands=keep_bands, basis_name="def2-SVP")
+
+
+
 # 01_train_models.jl
 # Purpose: load prebuilt dataset, then train with many Julia threads
 
@@ -13,16 +62,17 @@ using JLD2
 
 include("data/plot_bands.jl")
 
-datafile = joinpath(@__DIR__, "dataset.jld2")
-@load datafile syslist sys_pert NORB kgrid keep_bands rcut bs_cart λ_ref_list_cart G_list_cart λ_ref_list_cart_pert G_list_cart_pert bs_sph  λ_ref_list_sph  G_list_sph  G_list_sph_pert
+#datafile = joinpath(@__DIR__, "dataset.jld2")
+#@load datafile syslist sys_pert NORB kgrid keep_bands rcut bs_cart λ_ref_list_cart G_list_cart λ_ref_list_cart_pert G_list_cart_pert bs_sph  λ_ref_list_sph  G_list_sph  G_list_sph_pert
 
+base_iterations = 10
 println("== TRAIN: CART simple3c ==")
 model_simple3c = simple_3c_model(bs_cart, NORB)
 ps_simple3c, st_simple3c = LuxCore.setup(MersenneTwister(1234), model_simple3c)
 
 ps_simple3c, x_history_simple3c =
     train(G_list_cart, model_simple3c, ps_simple3c, st_simple3c,
-          keep_bands, λ_ref_list_cart; iterations=10000)
+          keep_bands, λ_ref_list_cart; iterations=base_iterations)
 
 error_simple3c =
     RMSE(G_list_cart, λ_ref_list_cart, model_simple3c, ps_simple3c, st_simple3c;
@@ -40,7 +90,7 @@ compute_and_save_bandstructures(G_cart_pert, sys_pert, model_simple3c, ps_simple
 
 println("== TRAIN: SPH ACE ==")
 G_sph_pert = G_list_sph_pert[1]
-base_iterations = 10000
+
 
 ps_acev, st_acev, model_acev =
     multilevel_train(G_list_sph, λ_ref_list_sph, bs_sph, NORB, rcut;
