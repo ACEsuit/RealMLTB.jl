@@ -15,6 +15,49 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
     reshape(reshape(out, N^2, N) * coef, N, N)
 end
 
+function EPI_1e3c(BS1::BasisSet, BS2::BasisSet)
+    out = zeros(BS1.nbas, BS1.nbas, BS2.nbas)
+    EPI_1e3c!(out, BS1, BS2)
+end
+
+function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
+    Nvals1 = num_basis.(BS1.basis)
+    Nvals2 = num_basis.(BS2.basis)
+    Nmax1 = maximum(Nvals1)
+    Nmax2 = maximum(Nvals2)
+
+    # Offset list for each shell, used to map shell index to AO index
+    ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
+    ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
+
+    allocate(body) = body(zeros(Cdouble, Nmax1^2*Nmax2))
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1) do k, buf
+        @inbounds begin
+            Nk = Nvals2[k]
+            koff = ao_offset2[k]
+            K = (koff+1):(koff+Nk)
+            for i in 1:BS1.nshells
+                for j = i:BS1.nshells
+                    Ni = Nvals1[i]
+                    Nj = Nvals1[j]
+                    Nijk = Ni*Nj*Nk
+                    ioff = ao_offset1[i]
+                    joff = ao_offset1[j]
+                    I = (ioff+1):(ioff+Ni)
+                    J = (joff+1):(joff+Nj)
+                    
+                    generate_V_triple!(buf, BS1.basis[i], BS1.basis[j], BS2.basis[k])
+
+                    vals = reshape(view(buf, 1:Nijk), Ni, Nj, Nk)
+                    out[I, J, K] = vals
+                    out[J, I, K] = permutedims(vals, [2, 1, 3])
+                end
+            end
+        end
+    end
+    return out
+end
+
 # Effective potential integral over three centers
 function EPI_1e3c(BS::BasisSet)
     out = zeros(BS.nbas, BS.nbas, BS.nbas)
@@ -136,19 +179,19 @@ end
     @inbounds for k = 1 : maxam3 + 1, j = 1 : maxam2 + 1, i = 1 : maxam1 + 1
       # handle t = 1 case
       if i > 1
-         @views E3[:, 1, i, j, k] .+= QA .* E3[:, 1, i - 1, j, k] .+ E3[:, 2, i - 1, j, k]
+        @views @. E3[:, 1, i, j, k] += QA * E3[:, 1, i - 1, j, k] + E3[:, 2, i - 1, j, k]
       elseif j > 1
-         @views E3[:, 1, i, j, k] .+= QB .* E3[:, 1, i, j - 1, k] .+ E3[:, 2, i, j - 1, k]
+        @views @. E3[:, 1, i, j, k] += QB * E3[:, 1, i, j - 1, k] + E3[:, 2, i, j - 1, k]
       elseif k > 1
-         @views E3[:, 1, i, j, k] .+= QC .* E3[:, 1, i, j, k - 1] .+ E3[:, 2, i, j, k - 1]
+        @views @. E3[:, 1, i, j, k] += QC * E3[:, 1, i, j, k - 1] + E3[:, 2, i, j, k - 1]
       end
       for t = 2 : i + j + k - 1
          if i > 1
-            @. @views E3[:, t, i, j, k] += QA * E3[:, t, i - 1, j, k] + t * E3[:, t + 1, i - 1, j, k] + oo2q * E3[:, t - 1, i - 1, j, k]
+            @views @. E3[:, t, i, j, k] += QA * E3[:, t, i - 1, j, k] + t * E3[:, t + 1, i - 1, j, k] + oo2q * E3[:, t - 1, i - 1, j, k]
          elseif j > 1
-            @. @views E3[:, t, i, j, k] += QB * E3[:, t, i, j - 1, k] + t * E3[:, t + 1, i, j - 1, k] + oo2q * E3[:, t - 1, i, j - 1, k]
+            @views @. E3[:, t, i, j, k] += QB * E3[:, t, i, j - 1, k] + t * E3[:, t + 1, i, j - 1, k] + oo2q * E3[:, t - 1, i, j - 1, k]
          elseif k > 1
-            @. @views E3[:, t, i, j, k] += QC * E3[:, t, i, j, k - 1] + t * E3[:, t + 1, i, j, k - 1] + oo2q * E3[:, t - 1, i, j, k - 1]
+            @views @. E3[:, t, i, j, k] += QC * E3[:, t, i, j, k - 1] + t * E3[:, t + 1, i, j, k - 1] + oo2q * E3[:, t - 1, i, j, k - 1]
          end
       end
    end
@@ -194,28 +237,24 @@ end
 using Molecules
 
 function compute_pair_AO_integrals(bs, R_bohr)
-    molR_list = [bs.atoms...]
-    for atoms in bs.atoms
-        atoms_R = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
-        push!(molR_list, atoms_R)
+    mol_R = similar(bs.atoms)
+    for (i, atoms) in enumerate(bs.atoms)
+        mol_R[i] = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
     end
+    bs_R = BasisSet(bs.name, mol_R; spherical=false, lib=:acsint)
 
-    bs_pair = BasisSet(bs.name, molR_list; spherical=false, lib=:acsint)
-    T, V, S = compute_AO_integrals(bs_pair)
+    T_pair = kinetic(bs, bs_R)
+	S_pair = overlap(bs, bs_R)
+    V_pair = EPI_1e3c(bs, bs_R)
 
-    nbas = div(size(T, 1), 2)
-    S_pair = S[1:nbas, nbas+1:2*nbas]
-    T_pair = T[1:nbas, nbas+1:2*nbas]
-    V_pair = V[1:nbas, 1:nbas, nbas+1:2*nbas]
     return T_pair, V_pair, S_pair
 end
 
 function compute_AO_integrals(bs)
-    S_pair = overlap(bs)
-    T_pair = kinetic(bs)
-
-    V_pair = zeros(bs.nbas, bs.nbas, bs.nbas)
-    EPI_1e3c!(V_pair, bs)
-    return T_pair, V_pair, S_pair
+    T = kinetic(bs)
+    V = EPI_1e3c(bs)
+    S = overlap(bs)
+   
+    return T, V, S
 end
 
