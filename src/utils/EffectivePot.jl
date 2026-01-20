@@ -1,7 +1,8 @@
 using GaussianBasis
 import GaussianBasis: num_basis
+import GaussianBasis: Acsint
 
-const ang2bohr = GaussianBasis.Acsint.ang2bohr
+const ang2bohr = Acsint.ang2bohr
 
 function EffectivePot(BS::BasisSet, coef::AbstractVector)
     out = zeros(BS.nbas, BS.nbas, BS.nbas)
@@ -13,6 +14,79 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
     @assert N == length(coef)
     EPI_1e3c!(out, BS)
     reshape(reshape(out, N^2, N) * coef, N, N)
+end
+
+function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff = 1e-12)
+	# Pre allocate output
+	out = Cdouble[]
+	indexes = NTuple{3,Int16}[]
+
+    Nvals1 = num_basis.(BS1.basis)
+    Nvals2 = num_basis.(BS2.basis)
+    Nmax1 = maximum(Nvals1)
+    Nmax2 = maximum(Nvals2)
+
+    # Offset list for each shell, used to map shell index to AO index
+    ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
+    ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
+
+    # Loop thorugh i and k. Save pairs satsfying `<χiχk,χiχk> > cutoff` into ik_vals for integral screening
+	tmp = zeros(Cdouble, Nmax1*Nmax2)
+	ik_vals = Vector{Int16}[]
+    for (s1, bs1) in enumerate(BS1.basis)
+		i_vals = Int16[] 
+        for (s2, bs2) in enumerate(BS2.basis)
+			RealMLTB.generate_S2_pair!(tmp, bs1, bs2)
+			if √maximum(tmp) > cutoff
+				push!(i_vals, s2)
+			end
+        end
+		push!(ik_vals, i_vals)
+    end
+
+	allocate(body) = body(zeros(Cdouble, Nmax1^2*Nmax2))
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1) do k, buf
+        @inbounds begin
+            Nk = Nvals2[k]
+            koff = ao_offset2[k]
+            K = (koff+1):(koff+Nk)
+			i_vals = ik_vals[k]
+            for ip = 1:length(i_vals)
+				i = i_vals[ip]
+                for jp = ip:length(i_vals)
+					j = i_vals[jp]
+                    Ni = Nvals1[i]
+                    Nj = Nvals1[j]
+                    ioff = ao_offset1[i]
+                    joff = ao_offset1[j]
+                    I = (ioff+1):(ioff+Ni)
+                    J = (joff+1):(joff+Nj)
+                    
+                    generate_V_triple!(buf, BS1.basis[i], BS1.basis[j], BS2.basis[k])
+
+					if maximum(abs,buf) > cutoff
+						for (ni, nI) in enumerate(I), (nj, nJ) in enumerate(J)
+							if nI <= nJ
+								for (nk, nK) in enumerate(K)
+									nijk = Ni*Nj*(nk-1) + Ni*(nj-1) + ni
+									val = buf[nijk]
+									if abs(val) > cutoff
+										push!(indexes, (nI, nJ, nK))
+										push!(out, val)
+										if nI < nJ
+											push!(indexes, (nJ, nI, nK))
+											push!(out, val)
+										end
+									end
+								end
+							end
+						end
+					end
+                end
+            end
+        end
+    end
+	return indexes, out
 end
 
 function EPI_1e3c(BS1::BasisSet, BS2::BasisSet)
@@ -197,6 +271,68 @@ end
    end
 end
 
+function generate_S2_pair!(out, B1::CartesianShell, B2::CartesianShell)
+    # Generates the block of the square overlap matrix corresponding to a given shell pair, i.e., <χiχj,χiχj>
+
+    out .= 0.0
+
+    am1 = B1.l
+    am2 = B2.l
+
+    A = B1.atom.xyz .* ang2bohr
+    B = B2.atom.xyz .* ang2bohr
+
+    N1 = num_basis(B1)
+
+    E = similar(A, 3, 2am1 + 2am2 + 2, 2am1 + 1, 2am2 + 1)
+    E .= 0.0
+
+    B12 = square(B1)
+    B22 = square(B2)
+
+    for (ca, a) in zip(B12.coef, B12.exp)
+        for (cb, b) in zip(B22.coef, B22.exp)
+            p = a + b
+            P = (a * A + b * B) / p
+            prefac = ca * cb * (π / p) ^ 1.5
+
+            Acsint.generate_E_matrix!(E, 2am1, 2am2, P, A, B, a, b)
+
+            index1 = 1
+            for l1 in am1 : -1 : 0
+                for n1 in 0 : 1 : am1 - l1
+                    m1 = am1 - l1 - n1
+                    index2 = 1
+                    for l2 in am2 : -1 : 0
+                        for n2 in 0 : 1 : am2 - l2
+                            m2 = am2 - l2 - n2
+                            out[index1 + N1*(index2-1)] += E[1, 1, 2l1+1, 2l2+1] * E[2, 1, 2m1+1, 2m2+1] * E[3, 1, 2n1+1, 2n2+1] * prefac
+                            index2 += 1
+                        end
+                    end
+                    index1 += 1
+                end
+            end
+        end
+    end
+    return out
+end
+
+function square(B::CartesianShell{A,R}) where {A,R}
+    coef = zeros(R, div(length(B.coef)*(length(B.coef)+1),2))
+    exp = copy(coef)
+    k = 1
+    for i = 1 : length(B.coef)
+        for j = i : length(B.coef)
+            coef[k] = i == j ? B.coef[i]^2 : 2B.coef[i]*B.coef[j]
+            exp[k]  = B.exp[i] + B.exp[j]
+            k += 1
+        end
+    end
+
+    CartesianShell(2B.l, coef, exp, B.atom)
+end
+
 @generated function find_unique_ijk(T, N)
     ex = :(unique_ijk = NTuple{3,T}[])
     tupleex = :(i1)
@@ -245,7 +381,7 @@ function compute_pair_AO_integrals(bs, R_bohr)
 
     T_pair = kinetic(bs, bs_R)
 	S_pair = overlap(bs, bs_R)
-    V_pair = EPI_1e3c(bs, bs_R)
+    V_pair = sparseEPI_1e3c(bs, bs_R)
 
     return T_pair, V_pair, S_pair
 end
@@ -257,4 +393,3 @@ function compute_AO_integrals(bs)
    
     return T, V, S
 end
-
