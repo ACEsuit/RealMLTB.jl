@@ -36,7 +36,7 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff = 1e-12)
     for (s1, bs1) in enumerate(BS1.basis)
 		i_vals = Int16[] 
         for (s2, bs2) in enumerate(BS2.basis)
-			RealMLTB.generate_S2_pair!(tmp, bs1, bs2)
+			generate_S2_pair!(tmp, bs1, bs2)
 			if √maximum(tmp) > cutoff
 				push!(i_vals, s2)
 			end
