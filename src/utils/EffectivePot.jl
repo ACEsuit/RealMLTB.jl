@@ -16,7 +16,7 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
     reshape(reshape(out, N^2, N) * coef, N, N)
 end
 
-function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff = 1e-12)
+function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
 	# Pre allocate output
 	out = Cdouble[]
 	indexes = NTuple{3,Int16}[]
@@ -30,7 +30,7 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff = 1e-12)
     ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
     ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
 
-    # Loop thorugh i and k. Save pairs satsfying `<χiχk,χiχk> > cutoff` into ik_vals for integral screening
+    # Loop thorugh i and k. Save pairs satsfying `√<χiχk,χiχk> > cutoff` into ik_vals for integral screening
 	tmp = zeros(Cdouble, Nmax1*Nmax2)
 	ik_vals = Vector{Int16}[]
     for (s1, bs1) in enumerate(BS1.basis)
@@ -372,7 +372,7 @@ end
 
 using Molecules
 
-function compute_pair_AO_integrals(bs, R_bohr)
+function compute_pair_AO_integrals(bs, R_bohr; cutoff=1e-12)
     mol_R = similar(bs.atoms)
     for (i, atoms) in enumerate(bs.atoms)
         mol_R[i] = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ ang2bohr)
@@ -381,7 +381,7 @@ function compute_pair_AO_integrals(bs, R_bohr)
 
     T_pair = kinetic(bs, bs_R)
 	S_pair = overlap(bs, bs_R)
-    V_pair = sparseEPI_1e3c(bs, bs_R)
+    V_pair = sparseEPI_1e3c(bs, bs_R, cutoff)
 
     return T_pair, V_pair, S_pair
 end
