@@ -153,7 +153,7 @@ bs_pred, λ_pred, G_pred = build_ref_and_graph_lists_sph(
 st_pred = merge(st, (layer_1 = merge(st.layer_1, (basisset = bs_pred,)),));
 λ_model, _ = model(G_pred[1], ps, st_pred);
 
-compute_and_save_bandstructures(G_pred, sys_pred, model, ps, st_pred;
+compute_and_save_bandstructures(G_pred[1], sys_pred, model, ps, st_pred;
     kgrid      = [4, 4, 4], 
     keep_bands = 4,
     name       = "si_pred.png")
