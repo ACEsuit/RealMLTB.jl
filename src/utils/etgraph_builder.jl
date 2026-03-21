@@ -6,6 +6,7 @@ using StaticArrays
 using NeighbourLists
 using EquivariantTensors
 using AtomsBase
+using Base.Threads
 
 function compute_pair_spherical_AO_integrals(bs::BasisSet, R_bohr)
     mol_pair = Molecules.Atom[]
@@ -21,11 +22,9 @@ function compute_pair_spherical_AO_integrals(bs::BasisSet, R_bohr)
     end
 
     bs_pair_cart = BasisSet(bs.name, mol_pair; spherical=false, lib=:acsint)
-
     T_sph, V_sph, S_sph = compute_spherical_AO_integrals(bs_pair_cart)
 
-    nbas = div(size(T_sph, 1), 2)
-
+    nbas   = div(size(T_sph, 1), 2)
     T_pair = T_sph[1:nbas, nbas+1:2*nbas]
     S_pair = S_sph[1:nbas, nbas+1:2*nbas]
     V_pair = V_sph[1:nbas, 1:nbas, nbas+1:2*nbas]
@@ -41,65 +40,57 @@ function nlist2graph(bs::BasisSet, nlist, sys, klist)
             BasisSet(bs.name, bs.atoms; spherical=true, lib=:acsint)
         end
 
-    X = position(sys, :)
-    ii = copy(nlist.i)
-    jj = copy(nlist.j)
+    X     = position(sys, :)
+    ii    = copy(nlist.i)
+    jj    = copy(nlist.j)
     first = copy(nlist.first)
 
-    npairs = length(ii)
-
+    npairs      = length(ii)
     R_cart_list = [NeighbourLists._getR(nlist, e) for e in 1:npairs]
     z0_list     = [NeighbourLists.AtomsBase.species(sys, i) for i in ii]
     z1_list     = [NeighbourLists.AtomsBase.species(sys, j) for j in jj]
 
-    total_pairs = 0
-    for n in 1:length(sys)
-        neigs, _ = NeighbourLists.neigs(nlist, n)
-        total_pairs += length(neigs)
-    end
-
-    idx = 0
-    last_pct = -1
-    t0 = time()
-
-    Tlist = Vector{Matrix{Float64}}(undef, npairs)
-    Vlist = Vector{Array{Float64,3}}(undef, npairs)
-    Slist = Vector{Matrix{Float64}}(undef, npairs)
+    Tlist      = Vector{Matrix{Float64}}(undef, npairs)
+    Vlist      = Vector{Array{Float64,3}}(undef, npairs)
+    Slist      = Vector{Matrix{Float64}}(undef, npairs)
     Rcell_list = Vector{SVector{3,Float64}}(undef, npairs)
 
-    for n in 1:length(sys)
-        neigs, Rs = NeighbourLists.neigs(nlist, n)
-        for m in 1:length(neigs)
-            idx += 1
-            @inbounds begin
-                pct = Int(floor(100 * idx / max(total_pairs, 1)))
-                if pct != last_pct
-                    elapsed = time() - t0
-                    println("progress: $(pct)%  ($idx / $total_pairs)  elapsed=$(round(elapsed; digits=1))s")
-                    flush(stdout)
-                    last_pct = pct
-                end
+    nthreads = Threads.nthreads()
+    println("Computing $npairs pair integrals on $nthreads threads ...")
+    flush(stdout)
 
-                j = neigs[m]
+    bs_per_thread = [BasisSet(bs_use.name, bs_use.atoms; spherical=true, lib=:acsint)
+                     for _ in 1:nthreads]
 
-                R_cell = (Rs[m] - UnitfulAtomic.ustrip.(X[j] - X[n])) .* RealMLTB.ang2bohr
-                R_cell = SVector{3,Float64}(R_cell)
+    t0 = time()
 
-                if norm(R_cell) < 1e-10
-                    T_pair, V_pair, S_pair = compute_spherical_AO_integrals(bs_use)
-                else
-                    T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals(bs_use, R_cell)
-                end
+    Threads.@threads for e in 1:npairs
+        tid    = Threads.threadid()
+        bs_loc = bs_per_thread[tid]   
 
-                Rcell_list[idx] = R_cell
-                Tlist[idx] = T_pair
-                Vlist[idx] = V_pair
-                Slist[idx] = S_pair
-            end
+        i = ii[e]
+        j = jj[e]
+
+        R_vec  = R_cart_list[e]
+        R_cell = (R_vec - UnitfulAtomic.ustrip.(X[j] - X[i])) .* RealMLTB.ang2bohr
+        R_cell = SVector{3,Float64}(R_cell)
+
+        if norm(R_cell) < 1e-10
+            T_pair, V_pair, S_pair = compute_spherical_AO_integrals(bs_loc)
+        else
+            T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals(bs_loc, R_cell)
         end
+
+        Rcell_list[e] = R_cell
+        Tlist[e]      = T_pair
+        Vlist[e]      = V_pair
+        Slist[e]      = S_pair
     end
 
-   
+    elapsed = round(time() - t0; digits=1)
+    println("  Done in $(elapsed)s. Building ETGraph ...")
+    flush(stdout)
+
     edge_data = [
         (
             𝐫      = R_cart_list[e],
@@ -118,7 +109,7 @@ function nlist2graph(bs::BasisSet, nlist, sys, klist)
 
     G = EquivariantTensors.ETGraph(
         ii, jj;
-        edge_data = edge_data,
+        edge_data  = edge_data,
         graph_data = (
             klist = klist_phys,
             T_on  = T_on,
@@ -153,7 +144,7 @@ function fractional_coordinates(sys)
     positions = map(sys) do atom
         coordinate = zeros(Float64, 3)
         coordinate[1:3] = lattice[1:3, 1:3] \ Float64.(austrip.(position(atom)))
-        SVector{3, Float64}(coordinate)
+        SVector{3,Float64}(coordinate)
     end
     return positions
 end

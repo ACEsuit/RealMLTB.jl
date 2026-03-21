@@ -145,13 +145,15 @@ println("  Saved bandstructure_si_$(i).png")
 sys_pred = perturb(bulk(:Si, cubic=true))#; ϵ = 0.02)
 
 bs_pred, λ_pred, G_pred = build_ref_and_graph_lists_sph(
-        [sys_pred], rcut, kgrid;
-        keep_bands = 4,
-        basis_name = "def2-SVP",
-)
+    [sys_pred], rcut, kgrid;
+    keep_bands = 4,
+    basis_name = "def2-SVP",
+);
 
-λ_pred, _ = model(G_pred, ps, st)
-compute_and_save_bandstructures(G_pred, sys_pred, model, ps, st;
+st_pred = merge(st, (layer_1 = merge(st.layer_1, (basisset = bs_pred,)),));
+λ_model, _ = model(G_pred[1], ps, st_pred);
+
+compute_and_save_bandstructures(G_pred, sys_pred, model, ps, st_pred;
     kgrid      = [4, 4, 4], 
     keep_bands = 4,
-    name       = "si_pred.png",)
+    name       = "si_pred.png")
