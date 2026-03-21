@@ -1,6 +1,3 @@
-# Compares the DFT reference band structure 
-# against the ML model predictions along high-symmetry paths.
-
 using Plots
 using DFTK
 using UnitfulAtomic
@@ -9,68 +6,90 @@ using EquivariantTensors
 using PseudoPotentialData
 
 function compare_bandstructure(band_data::NamedTuple, band_data2::NamedTuple;
-                                unit=u"hartree")
-    eshift = something(band_data.εF, 0.0)
-    data = DFTK.data_for_plotting(band_data)
-    data2 = DFTK.data_for_plotting(band_data2)
-
+                                unit = u"hartree")
+    eshift  = something(band_data.εF, 0.0)
+    data    = DFTK.data_for_plotting(band_data)
+    data2   = DFTK.data_for_plotting(band_data2)
     to_unit = DFTK.ustrip(DFTK.auconvert(unit, 1.0))
-    p = plot(; xlabel="wave vector", dpi = 1000)
 
+    p = plot(; xlabel = "wave vector", dpi = 1000)
+
+    # Reference bands (blue)
     first_band = true
-    for σ = 1:data.n_spin, iband = 1:data.n_bands, branch in data.kbranches
+    for σ in 1:data.n_spin, iband in 1:data.n_bands, branch in data.kbranches
         energies = (data.eigenvalues[:, iband, σ][branch] .- eshift) .* to_unit
         plot!(p, data.kdistances[branch], energies;
-              color=:blue, alpha=0.8,
-              label=(first_band ? "Reference" : ""))
+              color = :blue, alpha = 0.8,
+              label = (first_band ? "Reference" : ""))
         first_band = false
     end
 
+    # Predicted bands (red dashed)
     first_band2 = true
-    for σ = 1:data.n_spin, iband = 1:data2.n_bands, branch in data.kbranches
+    for σ in 1:data.n_spin, iband in 1:data2.n_bands, branch in data.kbranches
         energies = (data2.eigenvalues[:, iband, σ][branch] .- eshift) .* to_unit
         plot!(p, data.kdistances[branch], energies;
-              color=:red, alpha=0.8, linestyle=:dash,
-              label=(first_band2 ? "Prediction" : ""))
+              color = :red, alpha = 0.8, linestyle = :dash,
+              label = (first_band2 ? "Prediction" : ""))
         first_band2 = false
     end
 
+    # High-symmetry point vertical lines
     for branch in data.kbranches[1:end-1]
-        vline!(p, [data.kdistances[last(branch)]], color=:black, lw=0.5, label="")
+        vline!(p, [data.kdistances[last(branch)]]; color = :black, lw = 0.5, label = "")
     end
 
     xlims!(p, (0, data.kdistances[end]))
     xticks!(p, data.ticks.distances, data.ticks.labels)
     ylabel!(p, isnothing(band_data.εF) ?
-            "eigenvalues  ($(string(unit)))" :
-            "eigenvalues - εF  ($(string(unit)))")
+               "eigenvalues  ($(string(unit)))" :
+               "eigenvalues - εF  ($(string(unit)))")
 
     return p
 end
 
-function compute_and_save_bandstructures(G, sys, model, ps, st; kgrid = [4,4,4], keep_bands = 4, name = "test01")
-    lattice = RealMLTB.get_lattice(sys)
+function compute_and_save_bandstructures(G, sys, model, ps, st;
+                                         kgrid      = [4, 4, 4],
+                                         keep_bands = 4,
+                                         name       = "test01")
+    lattice   = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
 
-    # Define LDA pseudopotential model for Si
-    Si = ElementPsp(:Si, PseudoFamily("dojo.nc.sr.lda.v0_4_1.standard.upf"))
-    atoms = [Si, Si]
+    Si       = ElementPsp(:Si, PseudoFamily("dojo.nc.sr.lda.v0_4_1.standard.upf"))
+    atoms    = fill(Si, length(positions))   # not hardcoded to 2
     modeldft = model_DFT(lattice, atoms, positions;
-                          functionals = LDA(), temperature = 0.01)
-    basis = PlaneWaveBasis(modeldft; Ecut = 15, kgrid = kgrid)
-    scfres = self_consistent_field(basis, tol=1e-8, callback = (_) -> nothing)
-    # Compute band structure along high-symmetry k-path
+                         functionals = LDA(), temperature = 0.01)
+    basis    = PlaneWaveBasis(modeldft; Ecut = 15, kgrid = kgrid)
+    scfres   = self_consistent_field(basis; tol = 1e-8, callback = (_) -> nothing)
+
+    # DFT band structure along high-symmetry path
     kpath = irrfbz_path(modeldft)
-    bands = compute_bands(scfres, kpath; kline_density=20u"bohr")
-    kpoints = bands.kinter
+    bands = compute_bands(scfres, kpath; kline_density = 20u"bohr")
 
-    ref_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in bands.eigenvalues])
+    # Truncate reference bands to keep_bands
+    ref_bands = merge(bands, (;
+        eigenvalues = [eigs[1:keep_bands] for eigs in bands.eigenvalues],
+    ))
 
-    G2 = EquivariantTensors.ETGraph(G.ii, G.jj; edge_data = G.edge_data, graph_data = merge(G.graph_data, (; klist = RealMLTB.physical_k.(Ref(sys), kpoints))))
+    # Build a new ETGraph with the band-path k-points
+    kpoints_physical = RealMLTB.physical_k.(Ref(sys), bands.kinter)
+    G2 = EquivariantTensors.ETGraph(
+        G.ii, G.jj;
+        edge_data  = G.edge_data,
+        graph_data = merge(G.graph_data, (; klist = kpoints_physical)),
+    )
 
-    predict = model(G2, ps, st)[1]
-    predict_bands = (; bands..., eigenvalues = [eigs[1:keep_bands] for eigs in predict])
+    # ML predictions: model returns Vector{Vector{Float64}}, one per k-point
+    predict = model(G2, ps, st)[1]   # length = nk, each element = Vector of eigenvalues
+
+    # Wrap predictions into a DFTK-compatible bands NamedTuple
+    # eigenvalues field must be a vector of vectors (one per k-point, already sorted)
+    predict_bands = merge(bands, (;
+        eigenvalues = [p[1:min(keep_bands, length(p))] for p in predict],
+    ))
 
     p = compare_bandstructure(ref_bands, predict_bands)
     savefig(p, "bandstructure_$(name).png")
+    println("Saved bandstructure_$(name).png")
+    return p
 end

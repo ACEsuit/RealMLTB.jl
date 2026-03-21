@@ -1,43 +1,62 @@
+# 3c_layers.jl
+#
+# Four Lux layers that map  G → (G, vH, vS):
+#
+#   Simple3Center    : Wv, Wb are plain trainable parameters
+#   ACEv3Center      : Wv from equivariant ACE, Wb is a plain parameter
+#   ACE3CenterCaseA  : Wv from ACE, Wb from Wpsi Case-A (co-rotating)
+#   ACE3CenterCaseB  : Wv from ACE, Wb from Wpsi Case-B (isotropic)
+
 using LinearAlgebra
 using Random
 using Lux
 import LuxCore
 using EquivariantTensors
 
-export Simple3Center, ACEv3Center, ACE3CenterCaseB, ACE3CenterCaseA
+export Simple3Center, ACEv3Center, ACE3CenterCaseA, ACE3CenterCaseB
 
-# ------------------------------------------------------------
-# 1) Simple3Center: Wv and Wb are plain parameters
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helper: broadcast a per-atom Wb_atom (NORB × Nb) to the full system
+# by Kronecker product with identity over atoms.
+# ---------------------------------------------------------------------------
+function kron_I_atoms(NATOM::Int, Wb_atom::AbstractMatrix)
+    return kron(Matrix{eltype(Wb_atom)}(I, NATOM, NATOM), Wb_atom)
+end
+
+# ---------------------------------------------------------------------------
+# 1) Simple3Center
+#    Wv ∈ ℝ^NBAS and Wb_atom ∈ ℝ^{NORB × Nb} are plain parameters.
+# ---------------------------------------------------------------------------
 struct Simple3Center{NORB, NBAS, NATOM, B} <: Lux.AbstractLuxLayer
     basisset::B
 end
 
-function LuxCore.initialparameters(rng::AbstractRNG,
-                                   l::Simple3Center{NORB, NBAS, NATOM}) where {NORB, NBAS, NATOM}
-    Wv = Lux.glorot_normal(rng, Float64, NBAS)
-    Nb = div(NBAS, NATOM)
-    Wb = Lux.glorot_normal(rng, Float64, NORB, Nb)
-    return (Wv=Wv, Wb=Wb)
+function Simple3Center(bs, NORB::Int)
+    NBAS  = bs.nbas
+    NATOM = bs.natoms
+    return Simple3Center{NORB, NBAS, NATOM, typeof(bs)}(bs)
 end
 
-LuxCore.initialstates(rng::AbstractRNG, l::Simple3Center) = (basisset=l.basisset,)
+function LuxCore.initialparameters(rng::AbstractRNG,
+                                   l::Simple3Center{NORB,NBAS,NATOM}) where {NORB,NBAS,NATOM}
+    Nb      = div(NBAS, NATOM)
+    Wv      = Lux.glorot_normal(rng, Float64, NBAS)
+    Wb_atom = Lux.glorot_normal(rng, Float64, NORB, Nb)
+    return (Wv=Wv, Wb=Wb_atom)
+end
 
-function (l::Simple3Center{NORB, NBAS, NATOM})(G, ps, st) where {NORB, NBAS, NATOM}
-    bs = st.basisset
-    Wv = ps.Wv
-    Wb = kron_I_atoms(NATOM, ps.Wb)
-    vH, vS = _3center_triplet(G, bs, Wv, Wb)
+LuxCore.initialstates(::AbstractRNG, l::Simple3Center) = (basisset=l.basisset,)
+
+function (l::Simple3Center{NORB,NBAS,NATOM})(G, ps, st) where {NORB,NBAS,NATOM}
+    Wb   = kron_I_atoms(NATOM, ps.Wb)
+    vH, vS = _3center_triplet(G, st.basisset, ps.Wv, Wb)
     return (G, vH, vS), ps, st
 end
 
-function kron_I_atoms(NATOM::Int, Wb_atom::AbstractMatrix)
-    return kron(Matrix(I, NATOM, NATOM), Wb_atom)
-end
-
-# ------------------------------------------------------------
-# 2) ACEv3Center: Wv from ACE model, Wb is plain parameter
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 2) ACEv3Center
+#    Wv from equivariant ACE model; Wb_atom is a plain parameter.
+# ---------------------------------------------------------------------------
 struct ACEv3Center{M, B, NORB, NBAS, NATOM} <: Lux.AbstractLuxLayer
     ace_model::M
     basisset::B
@@ -51,10 +70,10 @@ end
 
 function LuxCore.initialparameters(rng::AbstractRNG,
                                    l::ACEv3Center{M,B,NORB,NBAS,NATOM}) where {M,B,NORB,NBAS,NATOM}
-    ps_ace = LuxCore.initialparameters(rng, l.ace_model) |> EquivariantTensors.float32
-    Nb = div(NBAS, NATOM)
-    Wb = Lux.glorot_normal(rng, Float64, NORB, Nb)
-    return (ace=ps_ace, Wb=Wb)
+    ps_ace  = LuxCore.initialparameters(rng, l.ace_model) |> EquivariantTensors.float32
+    Nb      = div(NBAS, NATOM)
+    Wb_atom = Lux.glorot_normal(rng, Float64, NORB, Nb)
+    return (ace=ps_ace, Wb=Wb_atom)
 end
 
 function LuxCore.initialstates(rng::AbstractRNG, l::ACEv3Center)
@@ -63,33 +82,33 @@ function LuxCore.initialstates(rng::AbstractRNG, l::ACEv3Center)
 end
 
 function (l::ACEv3Center{M,B,NORB,NBAS,NATOM})(G, ps, st) where {M,B,NORB,NBAS,NATOM}
-    val_tuple, st_ace = l.ace_model(G, ps.ace, st.ace)
+    val_tuple, st_ace = _ace_Wv_forward(l.ace_model, G, ps.ace, st.ace)
     Wv = assemble_Wv(val_tuple)
     Wb = kron_I_atoms(NATOM, ps.Wb)
-
     vH, vS = _3center_triplet(G, st.basisset, Wv, Wb)
     new_st = (ace=st_ace, basisset=st.basisset)
     return (G, vH, vS), ps, new_st
 end
 
-
-# ------------------------------------------------------------
-# 3) ACE3CenterCaseA: Wv from ACE, Wb from Wpsi CaseA
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 3) ACE3CenterCaseA
+#    Wv from equivariant ACE; Wb from Wpsi Case-A (co-rotating compressed basis).
+#    The assembled Wpsi is already the full (NATOM*NORB) × (NATOM*Nb) matrix.
+# ---------------------------------------------------------------------------
 struct ACE3CenterCaseA{Mv, Mψ, B, NBAS, NATOM} <: Lux.AbstractLuxLayer
     ace_v_model::Mv
     wpsi_model::Mψ
     basisset::B
-    n_channels_φ::Any
-    nψ::Any
+    n_channels_φ::Any   # tuple: AO shells per l
+    nψ::Any             # tuple: compressed orbitals per l
 end
 
 function ACE3CenterCaseA(ace_v_model, wpsi_model, bs, n_channels_φ, nψ)
     NBAS  = bs.nbas
     NATOM = bs.natoms
-    return ACE3CenterCaseA{typeof(ace_v_model), typeof(wpsi_model), typeof(bs), NBAS, NATOM}(
-        ace_v_model, wpsi_model, bs, n_channels_φ, nψ
-    )
+    return ACE3CenterCaseA{
+        typeof(ace_v_model), typeof(wpsi_model), typeof(bs), NBAS, NATOM}(
+        ace_v_model, wpsi_model, bs, n_channels_φ, nψ)
 end
 
 function LuxCore.initialparameters(rng::AbstractRNG, l::ACE3CenterCaseA)
@@ -105,21 +124,32 @@ function LuxCore.initialstates(rng::AbstractRNG, l::ACE3CenterCaseA)
 end
 
 function (l::ACE3CenterCaseA)(G, ps, st)
-    val_v, st_v = l.ace_v_model(G, ps.acev, st.acev)
-    val_ψ, st_ψ = l.wpsi_model(G, ps.wpsi, st.wpsi)
+    val_v, st_v = _ace_Wv_forward(l.ace_v_model, G, ps.acev, st.acev) 
+    val_ψ, st_ψ = _ace_Wv_forward(l.wpsi_model, G, ps.wpsi, st.wpsi)
 
     Wv = assemble_Wv(val_v)
-    # CaseA model output is typically (val_scalar,), so use [1]
-    Wb = assemble_Wpsi_caseA(val_ψ[1], l.n_channels_φ, l.nψ)
+    # Case A model outputs a scalar matrix (or 1-tuple thereof);
+    # use get_valscalar for robust unwrapping.
+    val_ψ_scalar = if val_ψ isa AbstractMatrix
+        val_ψ
+    elseif val_ψ isa Tuple && length(val_ψ) == 1
+        val_ψ[1]
+    elseif val_ψ isa NamedTuple
+        getfield(val_ψ, first(fieldnames(typeof(val_ψ))))
+    else
+        error("ACE3CenterCaseA: unexpected val_ψ type $(typeof(val_ψ))")
+    end
+    Wb = assemble_Wpsi_caseA(val_ψ_scalar, l.n_channels_φ, l.nψ)
 
     vH, vS = _3center_triplet(G, st.basisset, Wv, Wb)
     new_st = (acev=st_v, wpsi=st_ψ, basisset=st.basisset)
     return (G, vH, vS), ps, new_st
 end
 
-# ------------------------------------------------------------
-# 4) ACE3CenterCaseB: Wv from ACE, Wb from Wpsi CaseB
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 4) ACE3CenterCaseB
+#    Wv from equivariant ACE; Wb from Wpsi Case-B (isotropic scalar orbitals).
+# ---------------------------------------------------------------------------
 struct ACE3CenterCaseB{Mv, Mψ, B, NORB, NBAS, NATOM} <: Lux.AbstractLuxLayer
     ace_v_model::Mv
     wpsi_model::Mψ
@@ -130,9 +160,9 @@ end
 function ACE3CenterCaseB(ace_v_model, wpsi_model, bs, NORB::Int, n_channels_φ)
     NBAS  = bs.nbas
     NATOM = bs.natoms
-    return ACE3CenterCaseB{typeof(ace_v_model), typeof(wpsi_model), typeof(bs), NORB, NBAS, NATOM}(
-        ace_v_model, wpsi_model, bs, n_channels_φ
-    )
+    return ACE3CenterCaseB{
+        typeof(ace_v_model), typeof(wpsi_model), typeof(bs), NORB, NBAS, NATOM}(
+        ace_v_model, wpsi_model, bs, n_channels_φ)
 end
 
 function LuxCore.initialparameters(rng::AbstractRNG, l::ACE3CenterCaseB)
@@ -148,8 +178,8 @@ function LuxCore.initialstates(rng::AbstractRNG, l::ACE3CenterCaseB)
 end
 
 function (l::ACE3CenterCaseB{Mv,Mψ,B,NORB,NBAS,NATOM})(G, ps, st) where {Mv,Mψ,B,NORB,NBAS,NATOM}
-    val_v, st_v = l.ace_v_model(G, ps.acev, st.acev)
-    val_ψ, st_ψ = l.wpsi_model(G, ps.wpsi, st.wpsi)
+    val_v, st_v = _ace_Wv_forward(l.ace_v_model, G, ps.acev, st.acev)
+    val_ψ, st_ψ = _ace_Wv_forward(l.wpsi_model, G, ps.wpsi, st.wpsi)
 
     Wv = assemble_Wv(val_v)
     Wb = assemble_Wpsi_caseB(val_ψ, l.n_channels_φ, NORB)
@@ -158,4 +188,3 @@ function (l::ACE3CenterCaseB{Mv,Mψ,B,NORB,NBAS,NATOM})(G, ps, st) where {Mv,Mψ
     new_st = (acev=st_v, wpsi=st_ψ, basisset=st.basisset)
     return (G, vH, vS), ps, new_st
 end
-

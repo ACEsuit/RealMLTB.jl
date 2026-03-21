@@ -1,4 +1,5 @@
 using GaussianBasis
+using Molecules
 import GaussianBasis: num_basis
 import GaussianBasis: Acsint
 
@@ -17,76 +18,73 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
 end
 
 function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
-	# Pre allocate output
-	out = Cdouble[]
-	indexes = NTuple{3,Int16}[]
+    out = Cdouble[]
+    indexes = NTuple{3,Int16}[]
 
     Nvals1 = num_basis.(BS1.basis)
     Nvals2 = num_basis.(BS2.basis)
     Nmax1 = maximum(Nvals1)
     Nmax2 = maximum(Nvals2)
 
-    # Offset list for each shell, used to map shell index to AO index
     ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
     ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
 
-    # Loop thorugh i and k. Save pairs satsfying `√<χiχk,χiχk> > cutoff` into ik_vals for integral screening
-	tmp = zeros(Cdouble, Nmax1*Nmax2)
-	ik_vals = Vector{Int16}[]
+    tmp = zeros(Cdouble, Nmax1 * Nmax2)
+    ik_vals = Vector{Int16}[]
     for (s1, bs1) in enumerate(BS1.basis)
-		i_vals = Int16[] 
+        i_vals = Int16[]
         for (s2, bs2) in enumerate(BS2.basis)
-			generate_S2_pair!(tmp, bs1, bs2)
-			if √maximum(tmp) > cutoff
-				push!(i_vals, s2)
-			end
+            generate_S2_pair!(tmp, bs1, bs2)
+            if √maximum(tmp) > cutoff
+                push!(i_vals, s2)
+            end
         end
-		push!(ik_vals, i_vals)
+        push!(ik_vals, i_vals)
     end
 
-	allocate(body) = body(zeros(Cdouble, Nmax1^2*Nmax2))
+    allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
     GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1) do k, buf
         @inbounds begin
             Nk = Nvals2[k]
             koff = ao_offset2[k]
             K = (koff+1):(koff+Nk)
-			i_vals = ik_vals[k]
+            i_vals = ik_vals[k]
             for ip = 1:length(i_vals)
-				i = i_vals[ip]
+                i = i_vals[ip]
                 for jp = ip:length(i_vals)
-					j = i_vals[jp]
+                    j = i_vals[jp]
                     Ni = Nvals1[i]
                     Nj = Nvals1[j]
                     ioff = ao_offset1[i]
                     joff = ao_offset1[j]
                     I = (ioff+1):(ioff+Ni)
                     J = (joff+1):(joff+Nj)
-                    
+
                     generate_V_triple!(buf, BS1.basis[i], BS1.basis[j], BS2.basis[k])
 
-					if maximum(abs,buf) > cutoff
-						for (ni, nI) in enumerate(I), (nj, nJ) in enumerate(J)
-							if nI <= nJ
-								for (nk, nK) in enumerate(K)
-									nijk = Ni*Nj*(nk-1) + Ni*(nj-1) + ni
-									val = buf[nijk]
-									if abs(val) > cutoff
-										push!(indexes, (nI, nJ, nK))
-										push!(out, val)
-										if nI < nJ
-											push!(indexes, (nJ, nI, nK))
-											push!(out, val)
-										end
-									end
-								end
-							end
-						end
-					end
+                    if maximum(abs, buf) > cutoff
+                        for (ni, nI) in enumerate(I), (nj, nJ) in enumerate(J)
+                            if nI <= nJ
+                                for (nk, nK) in enumerate(K)
+                                    nijk = Ni * Nj * (nk - 1) + Ni * (nj - 1) + ni
+                                    val = buf[nijk]
+                                    if abs(val) > cutoff
+                                        push!(indexes, (nI, nJ, nK))
+                                        push!(out, val)
+                                        if nI < nJ
+                                            push!(indexes, (nJ, nI, nK))
+                                            push!(out, val)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
                 end
             end
         end
     end
-	return indexes, out
+    return indexes, out
 end
 
 function EPI_1e3c(BS1::BasisSet, BS2::BasisSet)
@@ -100,11 +98,10 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
     Nmax1 = maximum(Nvals1)
     Nmax2 = maximum(Nvals2)
 
-    # Offset list for each shell, used to map shell index to AO index
     ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
     ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
 
-    allocate(body) = body(zeros(Cdouble, Nmax1^2*Nmax2))
+    allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
     GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1) do k, buf
         @inbounds begin
             Nk = Nvals2[k]
@@ -114,12 +111,12 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
                 for j = i:BS1.nshells
                     Ni = Nvals1[i]
                     Nj = Nvals1[j]
-                    Nijk = Ni*Nj*Nk
+                    Nijk = Ni * Nj * Nk
                     ioff = ao_offset1[i]
                     joff = ao_offset1[j]
                     I = (ioff+1):(ioff+Ni)
                     J = (joff+1):(joff+Nj)
-                    
+
                     generate_V_triple!(buf, BS1.basis[i], BS1.basis[j], BS2.basis[k])
 
                     vals = reshape(view(buf, 1:Nijk), Ni, Nj, Nk)
@@ -132,7 +129,6 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
     return out
 end
 
-# Effective potential integral over three centers
 function EPI_1e3c(BS::BasisSet)
     out = zeros(BS.nbas, BS.nbas, BS.nbas)
     EPI_1e3c!(out, BS)
@@ -141,10 +137,7 @@ end
 function EPI_1e3c!(out, BS::BasisSet)
     Nvals = num_basis.(BS.basis)
     Nmax = maximum(Nvals)
-
-    # Offset list for each shell, used to map shell index to AO index
     ao_offset = [sum(Nvals[1:(i-1)]) for i = 1:BS.nshells]
-
     ijk = find_unique_ijk(BS.nshells)
 
     allocate(body) = body(zeros(Cdouble, Nmax^3))
@@ -153,7 +146,7 @@ function EPI_1e3c!(out, BS::BasisSet)
             Ni = Nvals[i]
             Nj = Nvals[j]
             Nk = Nvals[k]
-            Nijk = Ni*Nj*Nk
+            Nijk = Ni * Nj * Nk
             ioff = ao_offset[i]
             joff = ao_offset[j]
             koff = ao_offset[k]
@@ -204,16 +197,18 @@ function generate_V_triple!(out, B1::CartesianShell, B2::CartesianShell, B3::Car
                 generate_E3_matrix!(E3, am1, am2, am3, P, Q, A, B, C, a, b, c)
 
                 index1 = 1
-                for l1 in am1 : -1 : 0, n1 in 0 : am1 - l1
+                for l1 in am1:-1:0, n1 in 0:am1-l1
                     m1 = am1 - l1 - n1
                     index2 = 1
-                    for l2 in am2 : -1 : 0, n2 in 0 : am2 - l2
+                    for l2 in am2:-1:0, n2 in 0:am2-l2
                         m2 = am2 - l2 - n2
                         index3 = 1
-                        for l3 in am3 : -1 : 0, n3 in 0 : am3 - l3
+                        for l3 in am3:-1:0, n3 in 0:am3-l3
                             m3 = am3 - l3 - n3
                             index = index1 + N1*(index2-1) + N1*N2*(index3-1)
-                            out[index] += E3[1, 1, l1+1, l2+1, l3+1] * E3[2, 1, m1+1, m2+1, m3+1] * E3[3, 1, n1+1, n2+1, n3+1] * prefac
+                            out[index] += E3[1, 1, l1+1, l2+1, l3+1] *
+                                          E3[2, 1, m1+1, m2+1, m3+1] *
+                                          E3[3, 1, n1+1, n2+1, n3+1] * prefac
                             index3 += 1
                         end
                         index2 += 1
@@ -230,12 +225,8 @@ function generate_V_triple!(out, BS::BasisSet, s1, s2, s3)
     generate_V_triple!(out, BS.basis[s1], BS.basis[s2], BS.basis[s3])
 end
 
-@inline function generate_E3_matrix!(E3, maxam1, maxam2, maxam3,
-                           P, Q, A, B, C,
-                           a::Float64, b::Float64, c::Float64)
-    # Makes the Hermite->Cartesian conversion factors by recursion
+@inline function generate_E3_matrix!(E3, maxam1, maxam2, maxam3, P, Q, A, B, C, a::Float64, b::Float64, c::Float64)
     E3 .= 0
-
     p = a + b
     q = p + c
 
@@ -248,32 +239,30 @@ end
     µ = a * b / p
     ν = p * c / q
 
-    @inbounds @. E3[:, 1, 1, 1, 1] = exp(-µ*AB^2-ν*PC^2)
+    @inbounds @. E3[:, 1, 1, 1, 1] = exp(-µ * AB^2 - ν * PC^2)
     oo2q = 1 / (2 * q)
-    @inbounds for k = 1 : maxam3 + 1, j = 1 : maxam2 + 1, i = 1 : maxam1 + 1
-      # handle t = 1 case
-      if i > 1
-        @views @. E3[:, 1, i, j, k] += QA * E3[:, 1, i - 1, j, k] + E3[:, 2, i - 1, j, k]
-      elseif j > 1
-        @views @. E3[:, 1, i, j, k] += QB * E3[:, 1, i, j - 1, k] + E3[:, 2, i, j - 1, k]
-      elseif k > 1
-        @views @. E3[:, 1, i, j, k] += QC * E3[:, 1, i, j, k - 1] + E3[:, 2, i, j, k - 1]
-      end
-      for t = 2 : i + j + k - 1
-         if i > 1
-            @views @. E3[:, t, i, j, k] += QA * E3[:, t, i - 1, j, k] + t * E3[:, t + 1, i - 1, j, k] + oo2q * E3[:, t - 1, i - 1, j, k]
-         elseif j > 1
-            @views @. E3[:, t, i, j, k] += QB * E3[:, t, i, j - 1, k] + t * E3[:, t + 1, i, j - 1, k] + oo2q * E3[:, t - 1, i, j - 1, k]
-         elseif k > 1
-            @views @. E3[:, t, i, j, k] += QC * E3[:, t, i, j, k - 1] + t * E3[:, t + 1, i, j, k - 1] + oo2q * E3[:, t - 1, i, j, k - 1]
-         end
-      end
-   end
+
+    @inbounds for k = 1:maxam3+1, j = 1:maxam2+1, i = 1:maxam1+1
+        if i > 1
+            @views @. E3[:, 1, i, j, k] += QA * E3[:, 1, i-1, j, k] + E3[:, 2, i-1, j, k]
+        elseif j > 1
+            @views @. E3[:, 1, i, j, k] += QB * E3[:, 1, i, j-1, k] + E3[:, 2, i, j-1, k]
+        elseif k > 1
+            @views @. E3[:, 1, i, j, k] += QC * E3[:, 1, i, j, k-1] + E3[:, 2, i, j, k-1]
+        end
+        for t = 2:i+j+k-1
+            if i > 1
+                @views @. E3[:, t, i, j, k] += QA * E3[:, t, i-1, j, k] + t * E3[:, t+1, i-1, j, k] + oo2q * E3[:, t-1, i-1, j, k]
+            elseif j > 1
+                @views @. E3[:, t, i, j, k] += QB * E3[:, t, i, j-1, k] + t * E3[:, t+1, i, j-1, k] + oo2q * E3[:, t-1, i, j-1, k]
+            elseif k > 1
+                @views @. E3[:, t, i, j, k] += QC * E3[:, t, i, j, k-1] + t * E3[:, t+1, i, j, k-1] + oo2q * E3[:, t-1, i, j, k-1]
+            end
+        end
+    end
 end
 
 function generate_S2_pair!(out, B1::CartesianShell, B2::CartesianShell)
-    # Generates the block of the square overlap matrix corresponding to a given shell pair, i.e., <χiχj,χiχj>
-
     out .= 0.0
 
     am1 = B1.l
@@ -294,19 +283,22 @@ function generate_S2_pair!(out, B1::CartesianShell, B2::CartesianShell)
         for (cb, b) in zip(B22.coef, B22.exp)
             p = a + b
             P = (a * A + b * B) / p
-            prefac = ca * cb * (π / p) ^ 1.5
+            prefac = ca * cb * (π / p)^1.5
 
             Acsint.generate_E_matrix!(E, 2am1, 2am2, P, A, B, a, b)
 
             index1 = 1
-            for l1 in am1 : -1 : 0
-                for n1 in 0 : 1 : am1 - l1
+            for l1 in am1:-1:0
+                for n1 in 0:am1-l1
                     m1 = am1 - l1 - n1
                     index2 = 1
-                    for l2 in am2 : -1 : 0
-                        for n2 in 0 : 1 : am2 - l2
+                    for l2 in am2:-1:0
+                        for n2 in 0:am2-l2
                             m2 = am2 - l2 - n2
-                            out[index1 + N1*(index2-1)] += E[1, 1, 2l1+1, 2l2+1] * E[2, 1, 2m1+1, 2m2+1] * E[3, 1, 2n1+1, 2n2+1] * prefac
+                            out[index1 + N1*(index2-1)] +=
+                                E[1, 1, 2l1+1, 2l2+1] *
+                                E[2, 1, 2m1+1, 2m2+1] *
+                                E[3, 1, 2n1+1, 2n2+1] * prefac
                             index2 += 1
                         end
                     end
@@ -319,17 +311,16 @@ function generate_S2_pair!(out, B1::CartesianShell, B2::CartesianShell)
 end
 
 function square(B::CartesianShell{A,R}) where {A,R}
-    coef = zeros(R, div(length(B.coef)*(length(B.coef)+1),2))
-    exp = copy(coef)
+    coef = zeros(R, div(length(B.coef) * (length(B.coef)+1), 2))
+    exp  = copy(coef)
     k = 1
-    for i = 1 : length(B.coef)
-        for j = i : length(B.coef)
+    for i = 1:length(B.coef)
+        for j = i:length(B.coef)
             coef[k] = i == j ? B.coef[i]^2 : 2B.coef[i]*B.coef[j]
             exp[k]  = B.exp[i] + B.exp[j]
             k += 1
         end
     end
-
     CartesianShell(2B.l, coef, exp, B.atom)
 end
 
@@ -345,14 +336,15 @@ end
     for i = 1:3
         ii = Symbol("i$i")
         start = i == 3 ? 1 : Symbol("i$(i+1)")
-        ex2 = :(
+        ex2 = quote
             for $ii = $start:N
                 $ex2
             end
-        )
+        end
     end
     return :($ex; $ex2; unique_ijk)
 end
+
 find_unique_ijk(N) = find_unique_ijk(Int16, N)
 
 function find_symmetric_perms(i, j, k)
@@ -370,8 +362,6 @@ function find_symmetric_perms(i, j, k)
     end
 end
 
-using Molecules
-
 function compute_pair_AO_integrals(bs, R_bohr; cutoff=1e-12)
     mol_R = similar(bs.atoms)
     for (i, atoms) in enumerate(bs.atoms)
@@ -380,7 +370,7 @@ function compute_pair_AO_integrals(bs, R_bohr; cutoff=1e-12)
     bs_R = BasisSet(bs.name, mol_R; spherical=false, lib=:acsint)
 
     T_pair = kinetic(bs, bs_R)
-	S_pair = overlap(bs, bs_R)
+    S_pair = overlap(bs, bs_R)
     V_pair = sparseEPI_1e3c(bs, bs_R, cutoff)
 
     return T_pair, V_pair, S_pair
@@ -390,6 +380,5 @@ function compute_AO_integrals(bs)
     T = kinetic(bs)
     V = EPI_1e3c(bs)
     S = overlap(bs)
-   
     return T, V, S
 end

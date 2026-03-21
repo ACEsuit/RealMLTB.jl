@@ -7,14 +7,45 @@ using Zygote
 using ChainRulesCore
 using ChainRulesCore: NoTangent
 
+include("utils/etgraph_builder.jl")
 
+export EdgePayload,
+       compute_pair_spherical_AO_integrals,
+       nlist2graph
+       
 include("utils/EffectivePot.jl")
-include("utils/graph.jl")
-include("utils/integral.jl")
-include("utils/assemble.jl")
+include("utils/spherical_integrals.jl")
+include("utils/construct_integral.jl")
+
+export EffectivePot,
+       EffectivePot!,
+       sparseEPI_1e3c,
+       EPI_1e3c,
+       EPI_1e3c!,
+       generate_V_triple!,
+       compute_pair_AO_integrals,
+       compute_AO_integrals,
+       cart2sph,
+       cart2sph_generic,
+       cart2sph_hardcoded,
+       cart2sph_coeff,
+       compute_spherical_AO_integrals,
+       construct_integral,
+       siteblock,
+       atom_ao_ranges,
+       lmax_and_nchannels_per_atom
+
+
 include("ace/ace_common.jl")
 include("ace/ace_wv.jl")
 include("ace/ace_wpsi.jl")
+
+export build_ace_caseA_Wpsi_model,
+       build_ace_caseB_Wpsi_model,
+       assemble_Wpsi_caseA,
+       assemble_Wpsi_caseB
+
+include("utils/assemble.jl")
 include("model/3c_layers.jl")
 include("model/3c_models.jl")
 include("utils/assembly.jl")
