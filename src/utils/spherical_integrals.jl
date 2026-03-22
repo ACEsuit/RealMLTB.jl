@@ -183,3 +183,65 @@ function compute_spherical_AO_integrals(bs_in::BasisSet)
 
     return T_sph, V_sph, S_sph
 end
+
+function compute_spherical_AO_integrals_sparse(bs_in::BasisSet; cutoff=1e-12)
+    bs_cart =
+        if (bs_in.basis[1] isa SphericalShell) || (bs_in.lib != :acsint)
+            BasisSet(bs_in.name, bs_in.atoms; spherical=false, lib=:acsint)
+        else
+            bs_in
+        end
+
+    C = cart2sph_coeff(bs_cart)
+
+    S_cart_raw = overlap(bs_cart)
+    T_cart_raw = kinetic(bs_cart)
+
+    S_sph_raw = C' * S_cart_raw * C
+    T_sph_raw = C' * T_cart_raw * C
+
+    d_sph = 1.0 ./ sqrt.(diag(S_sph_raw))
+    replace!(d_sph, Inf => 0.0)
+    replace!(d_sph, NaN => 0.0)
+
+    S_sph = S_sph_raw .* (d_sph * d_sph')
+    T_sph = T_sph_raw .* (d_sph * d_sph')
+
+    N_cart = bs_cart.nbas
+    N_sph  = size(C, 2)
+
+    cart_cutoff = cutoff * 1e-3
+    indexes, vals = sparseEPI_1e3c(bs_cart, bs_cart, cart_cutoff)
+
+    V_sph_raw = zeros(N_sph, N_sph, N_sph)
+    @inbounds for n in eachindex(vals)
+        i, j, k = indexes[n]
+        v = vals[n]
+        abs(v) <= cart_cutoff && continue
+
+        for c in 1:N_sph
+            Ckc = C[k, c]
+            abs(Ckc) <= cutoff && continue
+            for b in 1:N_sph
+                Cjb = C[j, b]
+                abs(Cjb) <= cutoff && continue
+                Cjb_Ckc = Cjb * Ckc
+                for a in 1:N_sph
+                    V_sph_raw[a, b, c] += C[i, a] * Cjb_Ckc * v
+                end
+            end
+        end
+    end
+
+    out_indices = NTuple{3,Int}[]
+    out_vals    = Float64[]
+    @inbounds for c in 1:N_sph, b in 1:N_sph, a in 1:N_sph
+        v = V_sph_raw[a, b, c] * d_sph[a] * d_sph[b] * d_sph[c]
+        if abs(v) > cutoff
+            push!(out_indices, (a, b, c))
+            push!(out_vals, v)
+        end
+    end
+
+    return T_sph, (out_indices, out_vals), S_sph
+end

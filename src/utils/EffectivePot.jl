@@ -18,8 +18,9 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
 end
 
 function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
-    out = Cdouble[]
-    indexes = NTuple{3,Int16}[]
+    ntasks = Threads.nthreads()
+    local_indexes = [NTuple{3,Int16}[] for _ in 1:ntasks]
+    local_vals    = [Cdouble[]         for _ in 1:ntasks]
 
     Nvals1 = num_basis.(BS1.basis)
     Nvals2 = num_basis.(BS2.basis)
@@ -43,7 +44,10 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
     end
 
     allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
-    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1) do k, buf
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1, ntasks=1) do k, buf
+        tid = Threads.threadid()
+        l_idx = local_indexes[tid]
+        l_val = local_vals[tid]
         @inbounds begin
             Nk = Nvals2[k]
             koff = ao_offset2[k]
@@ -69,11 +73,11 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
                                     nijk = Ni * Nj * (nk - 1) + Ni * (nj - 1) + ni
                                     val = buf[nijk]
                                     if abs(val) > cutoff
-                                        push!(indexes, (nI, nJ, nK))
-                                        push!(out, val)
+                                        push!(l_idx, (nI, nJ, nK))
+                                        push!(l_val, val)
                                         if nI < nJ
-                                            push!(indexes, (nJ, nI, nK))
-                                            push!(out, val)
+                                            push!(l_idx, (nJ, nI, nK))
+                                            push!(l_val, val)
                                         end
                                     end
                                 end
@@ -84,6 +88,9 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
             end
         end
     end
+
+    indexes = reduce(vcat, local_indexes)
+    out     = reduce(vcat, local_vals)
     return indexes, out
 end
 
@@ -102,7 +109,7 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
     ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
 
     allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
-    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1) do k, buf
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1, ntasks=1) do k, buf
         @inbounds begin
             Nk = Nvals2[k]
             koff = ao_offset2[k]
@@ -141,7 +148,7 @@ function EPI_1e3c!(out, BS::BasisSet)
     ijk = find_unique_ijk(BS.nshells)
 
     allocate(body) = body(zeros(Cdouble, Nmax^3))
-    GaussianBasis.workerpool(allocate, ijk; chunksize=10) do (i, j, k), buf
+    GaussianBasis.workerpool(allocate, ijk; chunksize=10, ntasks=1) do (i, j, k), buf
         @inbounds begin
             Ni = Nvals[i]
             Nj = Nvals[j]
