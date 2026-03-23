@@ -31,16 +31,16 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
     ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
 
     tmp = zeros(Cdouble, Nmax1 * Nmax2)
-    ik_vals = Vector{Int16}[]
-    for (s1, bs1) in enumerate(BS1.basis)
+    ki_vals = Vector{Int16}[]
+    for (s2, bs2) in enumerate(BS2.basis)
         i_vals = Int16[]
-        for (s2, bs2) in enumerate(BS2.basis)
+        for (s1, bs1) in enumerate(BS1.basis)
             generate_S2_pair!(tmp, bs1, bs2)
             if √maximum(tmp) > cutoff
-                push!(i_vals, s2)
+                push!(i_vals, s1)
             end
         end
-        push!(ik_vals, i_vals)
+        push!(ki_vals, i_vals)
     end
 
     allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
@@ -52,7 +52,7 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
             Nk = Nvals2[k]
             koff = ao_offset2[k]
             K = (koff+1):(koff+Nk)
-            i_vals = ik_vals[k]
+            i_vals = ki_vals[k]
             for ip = 1:length(i_vals)
                 i = i_vals[ip]
                 for jp = ip:length(i_vals)

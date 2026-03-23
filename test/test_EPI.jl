@@ -134,3 +134,11 @@ end
       @test isapprox(out, ref)
    end
 end
+
+@testset "Sparse Effective Potential Integrals" begin
+   ref = EPI_1e3c(bs1, bs2)
+   out_sp = sparseEPI_1e3c(bs1, bs2)
+   out_mat = zero.(ref)
+   out_mat[CartesianIndex.(out_sp[1])] = out_sp[2]
+   @test isapprox(out_mat, ref)
+end

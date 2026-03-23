@@ -8,63 +8,95 @@ using EquivariantTensors
 using AtomsBase
 using Base.Threads
 
-function compute_pair_spherical_AO_integrals(bs::BasisSet, R_bohr)
-    mol_pair = Molecules.Atom[]
-    append!(mol_pair, bs.atoms)
+function compute_pair_spherical_AO_integrals(bs_in::BasisSet, R_bohr)
+    bs, bs_R, C, d_sph, S_pair_sph, T_pair_sph = one_body_pair_spherical_AO_integrals(bs_in, R_bohr)
 
-    for atom in bs.atoms
-        atom_R = Molecules.Atom(
-            atom.Z,
-            atom.mass,
-            atom.xyz + R_bohr ./ RealMLTB.ang2bohr
-        )
-        push!(mol_pair, atom_R)
+    N_cart = bs_R.nbas
+    V_pair_cart = EPI_1e3c(bs, bs_R)
+
+    N_sph = size(C, 2)
+
+    V_tmp1 = reshape(C' * reshape(V_pair_cart, N_cart, :), N_sph, N_cart, N_cart)
+    V_p1   = permutedims(V_tmp1, (2, 1, 3))
+    V_tmp2 = reshape(C' * reshape(V_p1, N_cart, :), N_sph, N_sph, N_cart)
+    V_p2   = permutedims(V_tmp2, (3, 2, 1))
+    V_tmp3 = reshape(C' * reshape(V_p2, N_cart, :), N_sph, N_sph, N_sph)
+
+    V_pair_sph_raw = permutedims(V_tmp3, (2, 3, 1))
+
+    V_pair_sph = zeros(N_sph, N_sph, N_sph)
+    @inbounds for k in 1:N_sph, j in 1:N_sph, i in 1:N_sph
+        V_pair_sph[i, j, k] = V_pair_sph_raw[i, j, k] * d_sph[i] * d_sph[j] * d_sph[k]
     end
 
-    bs_pair_cart = BasisSet(bs.name, mol_pair; spherical=false, lib=:acsint)
-    T_sph, V_sph, S_sph = compute_spherical_AO_integrals(bs_pair_cart)
-
-    nbas   = div(size(T_sph, 1), 2)
-    T_pair = T_sph[1:nbas, nbas+1:2*nbas]
-    S_pair = S_sph[1:nbas, nbas+1:2*nbas]
-    V_pair = V_sph[1:nbas, 1:nbas, nbas+1:2*nbas]
-
-    return T_pair, V_pair, S_pair
+    return T_pair_sph, V_pair_sph, S_pair_sph
 end
 
-function compute_pair_spherical_AO_integrals_sparse(bs::BasisSet, R_bohr)
-    mol_pair = Molecules.Atom[]
-    append!(mol_pair, bs.atoms)
+function compute_pair_spherical_AO_integrals_sparse(bs_in::BasisSet, R_bohr; cutoff=1e-12)
+    bs, bs_R, C, d_sph, S_pair_sph, T_pair_sph = one_body_pair_spherical_AO_integrals(bs_in, R_bohr)
 
-    for atom in bs.atoms
-        atom_R = Molecules.Atom(
-            atom.Z,
-            atom.mass,
-            atom.xyz + R_bohr ./ RealMLTB.ang2bohr
-        )
-        push!(mol_pair, atom_R)
+    cart_cutoff = cutoff * 1e-3
+    indexes, vals = sparseEPI_1e3c(bs, bs_R, cart_cutoff)
+
+    N_sph  = size(C, 2)
+    N_cart = bs_R.nbas
+    V_pair_cart = zeros(Float64, N_cart, N_cart, N_cart)
+    @inbounds for n in eachindex(indexes)
+        i, j, k = indexes[n]
+        V_pair_cart[i, j, k] = vals[n]
     end
 
-    bs_pair_cart = BasisSet(bs.name, mol_pair; spherical=false, lib=:acsint)
-    T_sph, V_sph, S_sph = compute_spherical_AO_integrals_sparse(bs_pair_cart)
+    V_tmp1 = reshape(C' * reshape(V_pair_cart, N_cart, :), N_sph, N_cart, N_cart)
+    V_p1   = permutedims(V_tmp1, (2, 1, 3))
+    V_tmp2 = reshape(C' * reshape(V_p1, N_cart, :), N_sph, N_sph, N_cart)
+    V_p2   = permutedims(V_tmp2, (3, 2, 1))
+    V_tmp3 = reshape(C' * reshape(V_p2, N_cart, :), N_sph, N_sph, N_sph)
+    
+    V_pair_sph_raw = permutedims(V_tmp3, (2, 3, 1))
 
-    nbas   = div(size(T_sph, 1), 2)
-    T_pair = T_sph[1:nbas, nbas+1:2*nbas]
-    S_pair = S_sph[1:nbas, nbas+1:2*nbas]
-
-    V_indices, V_vals = V_sph
-    pair_indices = NTuple{3,Int}[]
-    pair_vals    = Float64[]
-    for (idx, v) in zip(V_indices, V_vals)
-        a, b, c = idx
-        if a <= nbas && b <= nbas && nbas < c <= 2 * nbas
-            push!(pair_indices, (a, b, c - nbas))
-            push!(pair_vals, v)
+    out_indices = NTuple{3,Int}[]
+    out_vals    = Float64[]
+    @inbounds for c in 1:N_sph, b in 1:N_sph, a in 1:N_sph
+        v = V_pair_sph_raw[a, b, c] * d_sph[a] * d_sph[b] * d_sph[c]
+        if abs(v) > cutoff
+            push!(out_indices, (a, b, c))
+            push!(out_vals, v)
         end
     end
-    V_pair = (pair_indices, pair_vals)
 
-    return T_pair, V_pair, S_pair
+    return T_pair_sph, (out_indices, out_vals), S_pair_sph
+end
+
+function one_body_pair_spherical_AO_integrals(bs_in::BasisSet, R_bohr)
+    bs =
+        if (bs_in.basis[1] isa SphericalShell) || (bs_in.lib != :acsint)
+            BasisSet(bs_in.name, bs_in.atoms; spherical=false, lib=:acsint)
+        else
+            bs_in
+        end
+
+    mol_R = similar(bs.atoms)
+    for (i, atoms) in enumerate(bs.atoms)
+        mol_R[i] = Molecules.Atom(atoms.Z, atoms.mass, atoms.xyz + R_bohr ./ RealMLTB.ang2bohr)
+    end
+    bs_R = BasisSet(bs.name, mol_R; spherical=false, lib=:acsint)
+
+    C = RealMLTB.cart2sph_coeff(bs)
+    S = overlap(bs)
+
+    d_sph = 1.0 ./ sqrt.(diag(C' * S * C))
+    replace!(d_sph, Inf => 0.0, NaN => 0.0)
+
+    S_pair_cart = overlap(bs, bs_R)
+    T_pair_cart = kinetic(bs, bs_R)
+
+    S_pair_sph_raw = C' * S_pair_cart * C
+    T_pair_sph_raw = C' * T_pair_cart * C
+
+    S_pair_sph = S_pair_sph_raw .* (d_sph * d_sph')
+    T_pair_sph = T_pair_sph_raw .* (d_sph * d_sph')
+
+    return (; bs, bs_R, C, d_sph, S_pair_sph, T_pair_sph)
 end
 
 function nlist2graph(bs::BasisSet, nlist, sys, klist)
