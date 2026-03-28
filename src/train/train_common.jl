@@ -52,3 +52,16 @@ function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
 
     return rmse + reg
 end
+
+using MatrixFuns
+# compute $\|f(H(R)) - f(H^{ref}(R))\|_{op}$ with the unit cell $R=0$
+# H^{ref}(R)_{Ia, Jb} = \sum_{a',b'} (W^{ψ}_{Ia,a'})' * (H^{proj}(R))_{Ia',Jb'} * W^{ψ}_{Jb,b'}
+# H^{proj}(R) = 1/{N_k}\sum_k exp^{-im*k⋅R} * C(k)' * H^{PW}(k) * C(k) 
+# with (C(k))_{G, Ia} = \<e^{k+G}|ϕ_{Ia}\>
+function RMSE(H, H_ref, Wb, ps, st, filter::Function; H_reg=1e-4)
+    H_ref = Wb * H_ref * Wb' 
+    fH_ref = P * Diagonal(f.(D)) * inv(P)
+
+    ΔfH = mat_fun(filter, H_ref) - mat_fun(filter, H)
+    rmse = opnorm(ΔfH)
+end
