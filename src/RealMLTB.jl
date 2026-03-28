@@ -54,5 +54,6 @@ include("train/train_common.jl")
 include("train/train_single.jl")
 include("train/train_multilevel.jl")
 
+export multilevel_train_H
 
 end
