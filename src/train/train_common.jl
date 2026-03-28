@@ -60,7 +60,6 @@ using MatrixFuns
 # with (C(k))_{G, Ia} = \<e^{k+G}|ϕ_{Ia}\>
 function RMSE(H, H_ref, Wb, ps, st, filter::Function; H_reg=1e-4)
     H_ref = Wb * H_ref * Wb' 
-    fH_ref = P * Diagonal(f.(D)) * inv(P)
 
     ΔfH = mat_fun(filter, H_ref) - mat_fun(filter, H)
     rmse = opnorm(ΔfH)
