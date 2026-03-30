@@ -8,21 +8,23 @@ import GaussianBasis: Acsint
 using Unitful: Å
 using AtomsBuilder: rattle!
 using LinearAlgebra
+using SpecialFunctions
 
 # ---------------------------------------------------------------------------
-# Project the Hamiltonian from a completed (DFTK) SCF result onto atomic orbitals.
+# Fermi region filter: a soomthed step function with support near the Fermi level.
 # ---------------------------------------------------------------------------
-function project_pw_to_ao_hamiltonian(scfres, bs_ao::BasisSet)
-    scfres = DFTK.unfold_bz(scfres)
-    bs_pw = scfres.basis
-    nk = length(bs_pw.kpoints)
-    projs = build_pw_to_ao_projectors(bs_pw, bs_ao)
+struct FermiFilter{T<:Real}
+    μ::T       # Fermi level
+    σ::T       # smoothing parameter
+    width::T   # half-width of the plateau
+end
+FermiFilter() = FermiFilter(0.0, 0.1, 0.2)
 
-    H_AO = sum(1:nk) do ik
-        bs_pw.kweights[ik] * projs[ik]' * (scfres.ham.blocks[ik] * projs[ik])
-    end
+function eval_filter(x, f::FermiFilter)
+    rise = 0.5 * (1 + erf((x - f.μ + f.width) / f.σ))
+    fall = 0.5 * (1 - erf((x - f.μ - f.width) / f.σ))
 
-    return H_AO
+    return rise + fall - 1
 end
 
 # ---------------------------------------------------------------------------
@@ -81,7 +83,8 @@ end
 # ---------------------------------------------------------------------------
 # Run DFT on sys and return k-points and scfres
 # ---------------------------------------------------------------------------
-function generate_data_graphene(sys, kgrid; Ecut=15)
+function generate_data_graphene(sys, kgrid, filter::FermiFilter, bs_ao::BasisSet; 
+                                Ecut=15, nbands_plus=10)
     lattice = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
     C = ElementPsp(:C, PseudoFamily("cp2k.nc.sr.pbe.v0_1.semicore.gth"))
@@ -92,10 +95,22 @@ function generate_data_graphene(sys, kgrid; Ecut=15)
     basis = PlaneWaveBasis(model; Ecut, kgrid)
     scfres = self_consistent_field(basis; tol=1e-8, callback=(_) -> nothing)
 
-    basis_new = DFTK.unfold_bz(basis)
-    k_list = [SVector{3,Float64}(kp.coordinate) for kp in basis_new.kpoints]
+    εF = scfres.εF
+    filter_new = FermiFilter(εF, filter.σ, filter.width)
+    filter_fun(x) = eval_filter(x, filter_new)
+    if minimum(x->x[end], scfres.eigenvalues) >= εF + filter.width
+        nbands_plus = 0
+    end
+    nbands = AdaptiveBands(basis.model).n_bands_compute + nbands_plus
+    ham = Hamiltonian(basis; ρ=scfres.ρ)
+    eigres = diagonalize_all_kblocks(lobpcg_hyper, ham, nbands; ψguess=nothing)
+    λs = [λ[1:nbands] for λ in eigres.λ]
+    ψs = [X[:,1:nbands] for X in eigres.X]
 
-    return k_list, scfres
+    k_list = [SVector{3,Float64}(kp.coordinate) for kp in basis.kpoints]
+    proj = build_pw_to_ao_projectors(basis, bs_ao)
+
+    return k_list, basis.kweights, proj, filter_fun, λs, ψs
 end
 
 function build_graphene()
@@ -140,11 +155,15 @@ end
 # since all structures share the same element / basis-set type and thus the
 # same nbas and shell layout.
 # ---------------------------------------------------------------------------
-function build_ref_and_graph_lists_sph_graphene(syslist, rcut, kgrid;
-                                                basis_name = "def2-SVP")
-    H_ref_list = Vector{Any}(undef, length(syslist))
-    G_list     = Vector{Any}(undef, length(syslist))
-    bs_ref     = nothing   # will be set from the first (equilibrium) structure
+function build_ref_and_graph_lists_sph_graphene(syslist, rcut, kgrid, filter::FermiFilter;
+                                                basis_name = "def2-SVP", kws...)
+    λ_ref_list  = Vector{Any}(undef, length(syslist))
+    ψ_ref_list  = Vector{Any}(undef, length(syslist))
+    filter_list = Vector{Any}(undef, length(syslist))
+    proj_list   = Vector{Any}(undef, length(syslist))
+    kw_list     = Vector{Any}(undef, length(syslist))    
+    G_list      = Vector{Any}(undef, length(syslist))
+    bs_ref      = nothing   # will be set from the first (equilibrium) structure
 
     for i in eachindex(syslist)
         sys   = syslist[i]
@@ -164,16 +183,19 @@ function build_ref_and_graph_lists_sph_graphene(syslist, rcut, kgrid;
         end
 
         println("==== [$i] generate_data ===="); flush(stdout)
-        klist, scfres = generate_data_graphene(sys, kgrid)
-        H_ref = project_pw_to_ao_hamiltonian(scfres, bs_i)
+        klist, kweights, proj, f_i, λs, ψs = generate_data_graphene(sys, kgrid, filter, bs_i; kws...)
 
         println("==== [$i] build ETGraph ===="); flush(stdout)
         G = RealMLTB.nlist2graph(bs_i, nlist, sys, klist)
 
-        H_ref_list[i] = H_ref
-        G_list[i]     = G
+        λ_ref_list[i]  = λs
+        ψ_ref_list[i]  = ψs
+        filter_list[i] = f_i
+        proj_list[i]   = proj
+        kw_list[i]     = kweights
+        G_list[i]      = G
         println("==== [$i] done ===="); flush(stdout)
     end
 
-    return bs_ref, H_ref_list, G_list
+    return bs_ref, λ_ref_list, ψ_ref_list, filter_list, proj_list, kw_list, G_list
 end

@@ -158,3 +158,63 @@ function RMSE_H(Glist::AbstractVector, H_ref_AO_list::AbstractVector,
     end
     return total / length(Glist)
 end
+
+function RMSE_H2(Glist::AbstractVector, λ_ref_list::AbstractVector,
+                 ψ_ref_list::AbstractVector, proj_list::AbstractVector,
+                 kw_list::AbstractVector, filter_list::AbstractVector,
+                 model, ps, st; H_reg=1e-4)
+    @assert length(Glist) == length(λ_ref_list)
+    total = 0.0
+    for i in eachindex(Glist)
+        total += RMSE_H2(Glist[i], λ_ref_list[i], ψ_ref_list[i], proj_list[i], 
+                         kw_list[i], filter_list[i], model, ps, st; H_reg=H_reg)
+    end
+    return total / length(Glist)
+end
+
+
+function RMSE_H2(G, λ_ref, ψ_ref, proj, kweights, 
+                 filter::Function, model, ps, st; H_reg=1e-4)
+    # H_k from full model forward (gradients flow through ps → vH,vS → H_R0)
+    result = model(G, ps, st); out = result[1]
+    H_k = out.H_k
+
+    # Wb re-computed from layer_1 (gradients flow through ps → Wb)
+    Wb = _extract_Wb(model, G, ps, st)
+
+    Δop = sum(enumerate(kweights)) do (ik, ikw)
+        Jk = proj[ik] *  Wb'
+        H_ik = (H_k[ik] + H_k[ik]') / 2
+        fH_k_proj = Jk * mat_fun(filter, H_ik) * Jk' 
+        fH_k_ref = mat_fun_eigen(filter, λ_ref[ik], ψ_ref[ik])
+        ΔfH_k = fH_k_ref - fH_k_proj
+
+        ikw * opnorm(ΔfH_k)
+    end
+
+    return Δop
+end
+
+function mat_fun_eigen(f::Function, λ, ψ)
+    dof, nbands = size(ψ)
+    fH = zeros(eltype(ψ), dof, dof)
+    @views for i in 1:nbands
+        outersum!(fH, ψ[:, i], f(λ[i]))
+    end
+
+    return fH
+end
+
+function outersum!(result::AbstractMatrix, x::AbstractVector, a::Number)
+    is, js = axes(result)
+    if (is != js) || (is != axes(x, 1))
+        error("mismatched array sizes")
+    end
+    for j in js
+        for i in is
+            @inbounds ci, cj = x[i], x[j]
+            @inbounds result[i, j] = muladd(ci * conj(cj), a, result[i, j])
+        end
+    end
+    result
+end
