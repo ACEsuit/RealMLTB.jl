@@ -183,8 +183,12 @@ function RMSE_H2(G, λ_ref, ψ_ref, proj, kweights,
     Wb = _extract_Wb(model, G, ps, st)
 
     Δop = sum(enumerate(kweights)) do (ik, ikw)
-        Jk = ortho_lowdin(proj[ik] * Wb')
+        Jk = proj[ik] * Wb'
+        ihS = ortho_lowdin_hS(Jk)
+        Jk = Jk * ihS
         H_ik = (H_k[ik] + H_k[ik]') / 2
+        H_ik = ihS * H_ik * ihS
+        
         fH_k_proj = Jk * mat_fun(filter, H_ik) * Jk' 
         fH_k_ref = mat_fun_eigen(filter, λ_ref[ik], ψ_ref[ik])
         ΔfH_k = fH_k_ref - fH_k_proj
@@ -195,12 +199,11 @@ function RMSE_H2(G, λ_ref, ψ_ref, proj, kweights,
     return Δop
 end
 
-function ortho_lowdin(φk::AbstractArray{T}) where {T}
+function ortho_lowdin_hS(φk::AbstractArray{T}) where {T}
     evals, evecs = eigen(Hermitian(φk' * φk))
     # Check for linear dependence: eigenvalues close to zero
     @assert minimum(abs, evals) > eps(real(T)) * maximum(abs, evals) 
     ihS = evecs * Diagonal(evals .^ (-0.5)) * evecs'
-    φk * ihS
 end
 
 function mat_fun_eigen(f::Function, λ, ψ)
