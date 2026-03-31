@@ -177,13 +177,13 @@ function RMSE_H2(G, λ_ref, ψ_ref, proj, kweights,
                  filter::Function, model, ps, st; H_reg=1e-4)
     # H_k from full model forward (gradients flow through ps → vH,vS → H_R0)
     result = model(G, ps, st); out = result[1]
-    H_k = out.H_k
+    H_k = out.Hout
 
     # Wb re-computed from layer_1 (gradients flow through ps → Wb)
     Wb = _extract_Wb(model, G, ps, st)
 
     Δop = sum(enumerate(kweights)) do (ik, ikw)
-        Jk = proj[ik] *  Wb'
+        Jk = ortho_lowdin(proj[ik] * Wb')
         H_ik = (H_k[ik] + H_k[ik]') / 2
         fH_k_proj = Jk * mat_fun(filter, H_ik) * Jk' 
         fH_k_ref = mat_fun_eigen(filter, λ_ref[ik], ψ_ref[ik])
@@ -193,6 +193,14 @@ function RMSE_H2(G, λ_ref, ψ_ref, proj, kweights,
     end
 
     return Δop
+end
+
+function ortho_lowdin(φk::AbstractArray{T}) where {T}
+    evals, evecs = eigen(Hermitian(φk' * φk))
+    # Check for linear dependence: eigenvalues close to zero
+    @assert minimum(abs, evals) > eps(real(T)) * maximum(abs, evals) 
+    ihS = evecs * Diagonal(evals .^ (-0.5)) * evecs'
+    φk * ihS
 end
 
 function mat_fun_eigen(f::Function, λ, ψ)

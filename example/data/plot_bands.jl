@@ -98,7 +98,10 @@ function compute_and_save_bandstructures(G, sys, model, ps, st;
     elseif train_type == "hamiltonian"
         # ML predictions: model returns Vector{Matrix{ComplexF64}}, one per k-point
         # length = nk, each element = TB Hamiltonian matrix in k-space
-        eigenvalues = [eigvals(Hk)[1:min(keep_bands, size(Hk, 1))] for Hk in predict.H_k]
+        Hlist = predict.Hout
+        Slist = predict.Sout
+        λlist = RealMLTB.generate_λ(Hlist, Slist)
+        eigenvalues = [λ[1:min(keep_bands, length(λ))] for λ in λlist]
     end
     predict_bands = merge(bands, (;eigenvalues, ))            
 
