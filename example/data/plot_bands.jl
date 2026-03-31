@@ -49,17 +49,26 @@ function compare_bandstructure(band_data::NamedTuple, band_data2::NamedTuple;
 end
 
 function compute_and_save_bandstructures(G, sys, model, ps, st;
-                                         kgrid      = [4, 4, 4],
-                                         keep_bands = 4,
-                                         name       = "test01")
+                                         kgrid       = [4, 4, 4],
+                                         keep_bands  = 4,
+                                         train_type  = "bands",
+                                         psp_type    = "upf",
+                                         xc_type     = "lda",
+                                         temperature = 0.01,
+                                         Ecut        = 15,
+                                         name        = "test01")
     lattice   = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
 
-    Si       = ElementPsp(:Si, PseudoFamily("dojo.nc.sr.lda.v0_4_1.standard.upf"))
-    atoms    = fill(Si, length(positions))   # not hardcoded to 2
-    modeldft = model_DFT(lattice, atoms, positions;
-                         functionals = LDA(), temperature = 0.01)
-    basis    = PlaneWaveBasis(modeldft; Ecut = 15, kgrid = kgrid)
+    if psp_type == "upf"
+        psp = PseudoFamily("dojo.nc.sr.$(xc_type).v0_4_1.standard.upf")
+    elseif psp_type == "gth"
+        psp = PseudoFamily("cp2k.nc.sr.$(xc_type).v0_1.semicore.gth")
+    end
+    atoms = [ElementPsp(Symbol(species(p)), psp) for p in sys.particles]
+    funtionals = xc_type == "lda" ? LDA() : PBE()
+    modeldft = model_DFT(lattice, atoms, positions; functionals, temperature)
+    basis    = PlaneWaveBasis(modeldft; Ecut, kgrid)
     scfres   = self_consistent_field(basis; tol = 1e-8, callback = (_) -> nothing)
 
     # DFT band structure along high-symmetry path
@@ -79,14 +88,19 @@ function compute_and_save_bandstructures(G, sys, model, ps, st;
         graph_data = merge(G.graph_data, (; klist = kpoints_physical)),
     )
 
-    # ML predictions: model returns Vector{Vector{Float64}}, one per k-point
-    predict = model(G2, ps, st)[1]   # length = nk, each element = Vector of eigenvalues
-
-    # Wrap predictions into a DFTK-compatible bands NamedTuple
-    # eigenvalues field must be a vector of vectors (one per k-point, already sorted)
-    predict_bands = merge(bands, (;
-        eigenvalues = [p[1:min(keep_bands, length(p))] for p in predict],
-    ))
+    predict = model(G2, ps, st)[1] 
+    if train_type == "bands"
+        # ML predictions: model returns Vector{Vector{Float64}}, one per k-point
+        # length = nk, each element = Vector of eigenvalues
+        # Wrap predictions into a DFTK-compatible bands NamedTuple
+        # eigenvalues field must be a vector of vectors (one per k-point, already sorted)
+        eigenvalues = [p[1:min(keep_bands, length(p))] for p in predict]
+    elseif train_type == "hamiltonian"
+        # ML predictions: model returns Vector{Matrix{ComplexF64}}, one per k-point
+        # length = nk, each element = TB Hamiltonian matrix in k-space
+        eigenvalues = [eigvals(Hk)[1:min(keep_bands, size(Hk, 1))] for Hk in predict.H_k]
+    end
+    predict_bands = merge(bands, (;eigenvalues, ))            
 
     p = compare_bandstructure(ref_bands, predict_bands)
     savefig(p, "bandstructure_$(name).png")
