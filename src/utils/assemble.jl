@@ -190,15 +190,19 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
     return (vH, vS), pullback
 end
 
-function generate_λ(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
-   L = cholesky(S).L           # S = LLᵀ
-   A = L \ (H / L')            # i.e., A = L⁻¹ H L⁻ᵀ
-   AA = (A + A')/2
-   λ = GenericLinearAlgebra.eigen(AA).values
-   return λ
+function generate_λ_and_vecs(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
+    L  = cholesky(S).L
+    A  = L \ (H / L')
+    AA = (A + A') / 2
+    F  = GenericLinearAlgebra.eigen(AA)
+    λ  = F.values
+    V  = L' \ F.vectors
+    return λ, V
 end
 
-function generate_λ(Hlist::AbstractVector{TH}, Slist::AbstractVector{TS}) where {TH, TS}
-   λlist = [generate_λ(Hlist[i], Slist[i]) for i in 1:length(Hlist)]
-   return λlist
+function generate_λ_and_vecs(Hlist::AbstractVector{TH}, Slist::AbstractVector{TS}) where {TH, TS}
+    results = [generate_λ_and_vecs(Hlist[i], Slist[i]) for i in 1:length(Hlist)]
+    λlist = [r[1] for r in results]
+    Vlist = [r[2] for r in results]
+    return λlist, Vlist
 end

@@ -31,11 +31,11 @@ function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
     @assert length(Glist) == length(λ_ref_list)
 
     total_sq = 0.0
-    total_n = 0
+    total_n  = 0
 
     for i in eachindex(Glist)
         result = model(Glist[i], ps, st)
-        out = result[1]
+        out    = result[1]
         λ_pred = out.λ
 
         if any(v -> !all(isfinite, v), λ_pred)
@@ -43,41 +43,49 @@ function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
         end
 
         λ_pred_keep = getindex.(λ_pred, Ref(1:keep_bands))
-        diff = λ_pred_keep .- λ_ref_list[i]
-        total_sq += sum(v -> sum(abs2, v), diff)
-        total_n += length(diff) * keep_bands
+        diff        = λ_pred_keep .- λ_ref_list[i]
+        total_sq   += sum(v -> sum(abs2, v), diff)
+        total_n    += length(diff) * keep_bands
     end
 
     return sqrt(total_sq / total_n)
 end
 
+# ---------------------------------------------------------------------------
+# Hamiltonian RMSE (list version)
+# ---------------------------------------------------------------------------
+
 function RMSE_H(Glist::AbstractVector,
-                 λ_ref_list::AbstractVector,
-                 ψ_ref_list::AbstractVector,
-                 proj_list::AbstractVector,
-                 kw_list::AbstractVector,
-                 filter_list::AbstractVector,
-                 model, ps, st)
+                λ_ref_list::AbstractVector,
+                ψ_ref_list::AbstractVector,
+                proj_list::AbstractVector,
+                kw_list::AbstractVector,
+                filter_list::AbstractVector,
+                model, ps, st)
 
     n = length(Glist)
-    @assert length(λ_ref_list) == n
-    @assert length(ψ_ref_list) == n
-    @assert length(proj_list) == n
-    @assert length(kw_list) == n
+    @assert length(λ_ref_list)  == n
+    @assert length(ψ_ref_list)  == n
+    @assert length(proj_list)   == n
+    @assert length(kw_list)     == n
     @assert length(filter_list) == n
 
     total = 0.0
     for i in eachindex(Glist)
         total += RMSE_H(Glist[i],
-                         λ_ref_list[i],
-                         ψ_ref_list[i],
-                         proj_list[i],
-                         kw_list[i],
-                         filter_list[i],
-                         model, ps, st)
+                        λ_ref_list[i],
+                        ψ_ref_list[i],
+                        proj_list[i],
+                        kw_list[i],
+                        filter_list[i],
+                        model, ps, st)
     end
     return total / n
 end
+
+# ---------------------------------------------------------------------------
+# FermiFilter
+# ---------------------------------------------------------------------------
 
 struct FermiFilter{T<:Real}
     μ::T       # Fermi level
@@ -89,37 +97,45 @@ FermiFilter() = FermiFilter(0.0, 0.1, 0.2)
 function eval_filter(x, f)
     rise = 0.5 * (1 + erf((x - f.μ + f.width) / f.σ))
     fall = 0.5 * (1 - erf((x - f.μ - f.width) / f.σ))
-
     return rise + fall - 1
 end
+
+# ---------------------------------------------------------------------------
+# Hamiltonian RMSE (single structure)
+# ---------------------------------------------------------------------------
 
 function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st)
 
     result = model(G, ps, st)
-    out = result[1]
-    H_k = out.Hout
-    Wb  = out.Wb
+    out    = result[1]
+    Wb     = out.Wb
 
     filter_fn = let f = filter
         x -> eval_filter(x, f)
     end
 
     Δop = sum(enumerate(kweights)) do (ik, ikw)
-        Jk = proj[ik] * Wb'
+        ikw = kweights[ik]
+
+        Jk  = proj[ik] * Wb'
         ihS = ortho_lowdin_hS(Jk)
-        Jk = Jk * ihS
-        H_ik = (H_k[ik] + H_k[ik]') / 2
-        H_ik = ihS * H_ik * ihS
-        H_ik = (H_ik + H_ik') / 2
-
-        fH_k_proj = Jk * mat_fun(filter_fn, H_ik) * Jk'  
+        Jk  = Jk * ihS
+        λ_pred = out.λ[ik]
+        V      = out.Vlist[ik]
+        V_orth = ihS * V
+        fH_k_proj = Jk * (V_orth * Diagonal(filter_fn.(real.(λ_pred))) * V_orth') * Jk'
         fH_k_ref  = mat_fun_eigen(filter_fn, λ_ref[ik], ψ_ref[ik])
-        ΔfH_k = fH_k_ref - fH_k_proj
 
-        ikw * opnorm(ΔfH_k)
+        ΔfH_k = fH_k_ref - fH_k_proj
+        ikw * norm(ΔfH_k)
     end
 
     return Δop
+end
+
+function mat_fun_eigen(f, λ, ψ)
+    fλ = f.(real.(λ))
+    return ψ * Diagonal(fλ) * ψ'
 end
 
 # ---------------------------------------------------------------------------
@@ -131,27 +147,3 @@ function ortho_lowdin_hS(φk::AbstractArray{T}) where {T}
     @assert minimum(abs, evals) > eps(real(T)) * maximum(abs, evals)
     return evecs * Diagonal(evals .^ (-0.5)) * evecs'
 end
-
-function mat_fun_eigen(f, λ, ψ)
-    dof, nbands = size(ψ)
-    fH = zeros(eltype(ψ), dof, dof)
-    @views for i in 1:nbands
-        outersum!(fH, ψ[:, i], f(λ[i]))
-    end
-    return fH
-end
-
-function outersum!(result::AbstractMatrix, x::AbstractVector, a::Number)
-    is, js = axes(result)
-    if (is != js) || (is != axes(x, 1))
-        error("mismatched array sizes")
-    end
-    for j in js
-        for i in is
-            @inbounds ci, cj = x[i], x[j]
-            @inbounds result[i, j] = muladd(ci * conj(cj), a, result[i, j])
-        end
-    end
-    return result
-end
-

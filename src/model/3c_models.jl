@@ -19,9 +19,9 @@ import LuxCore
 export simple_3c_model, acev_3c_model, ace3c_A_model, ace3c_B_model
 
 function _final_layer(x)
-    Hout, Sout, Wb = x  
-    λlist = generate_λ(Hout, Sout)
-    return (λ = λlist, Hout = Hout, Sout = Sout, Wb = Wb)
+    Hout, Sout, Wb = x
+    λlist, Vlist = generate_λ_and_vecs(Hout, Sout)
+    return (λ = λlist, Vlist = Vlist, Hout = Hout, Sout = Sout, Wb = Wb)
 end
 
 # ---------------------------------------------------------------------------

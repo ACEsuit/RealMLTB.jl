@@ -60,31 +60,6 @@ println("\n=== Step 2: Train ===")
 
 NORB = 4
 
-using Random
-
-model = ace3c_B_model(bs, NORB, rcut;
-    Dtot = 4,
-    maxl = 3,
-    ORD  = 1,
-    rng  = MersenneTwister(42),
-)
-
-import LuxCore
-rng = MersenneTwister(42)
-ps, st = LuxCore.setup(rng, model)
-
-G = G_list[1]
-λ = λ_ref_list[1]
-ψ = ψ_ref_list[1]
-proj = proj_list[1]
-kw = kw_list[1]
-f = filter_list[1]
-
-RMSE_H(G, λ, ψ, proj, kw, f, model, ps, st)
-Zygote.gradient(p -> RMSE_H(G, λ, ψ, proj, kw, f, model, p, st), ps)
-
-
-
 ps, st, model = multilevel_train_H(
     G_list,
     λ_ref_list,
@@ -95,11 +70,11 @@ ps, st, model = multilevel_train_H(
     NORB,
     rcut;
     filter = filter_list,
-    model_type      = :ace3c_B,
+    model_type      = :acev_3c,
     target_Dtot     = 6,
     target_maxl     = 4,
     target_ORD      = 2,
-    H_iterations    = 1,
+    H_iterations    = 10,
     verbose         = true,
 )
 
