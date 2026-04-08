@@ -214,11 +214,14 @@ end
 end
 
 function _ace_Wv_forward(ace_model, G, ps, st)
+    return LuxCore.apply(ace_model, 
+                                   G, 
+                                   ps, st)
     # embed: stop gradient w.r.t. G (G is not a parameter)
-    Rnl_Ylm = Zygote.ignore() do
-        LuxCore.apply(ace_model.layers.embed, G, ps.embed, st.embed)[1]
-    end
-    st_embed = LuxCore.apply(ace_model.layers.embed, G, ps.embed, st.embed)[2]
-    val_tuple, st_ace = LuxCore.apply(ace_model.layers.ace, Rnl_Ylm, ps.ace, st.ace)
-    return val_tuple, (embed=st_embed, ace=st_ace)
+    #Rnl_Ylm = Zygote.ignore() do
+    #    LuxCore.apply(ace_model.layers.embed, G, ps.embed, st.embed)[1]
+    #end
+    #st_embed = LuxCore.apply(ace_model.layers.embed, G, ps.embed, st.embed)[2]
+    #val_tuple, st_ace = LuxCore.apply(ace_model.layers.ace, Rnl_Ylm, ps.ace, st.ace)
+    #return val_tuple, (embed=st_embed, ace=st_ace)
 end

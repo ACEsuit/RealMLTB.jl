@@ -18,14 +18,10 @@ import LuxCore
 
 export simple_3c_model, acev_3c_model, ace3c_A_model, ace3c_B_model
 
-# ---------------------------------------------------------------------------
-# Shared final layer: (Hout, Sout) → (λ=λlist, H_R0=H_R0)
-# ---------------------------------------------------------------------------
 function _final_layer(x)
     Hout, Sout = x
     λlist = generate_λ(Hout, Sout)
-    H_R0  = sum(Hout) / length(Hout)   # k-average → R=0 Hamiltonian in ψ-basis
-    return (λ = λlist, H_R0 = H_R0)
+    return (λ = λlist, Hout = Hout, Sout = Sout)
 end
 
 # ---------------------------------------------------------------------------

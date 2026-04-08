@@ -13,6 +13,7 @@ using Lux
 using Zygote
 using MatrixFuns
 using Optimisers: destructure
+using JLD2
 
 include("data/generate_data.jl")
 include("data/graphene_ham.jl")
@@ -20,12 +21,11 @@ include("data/graphene_ham.jl")
 # ============================================================
 # 1. Generate training data
 # ============================================================
-using JLD2
 println("=== Step 1: Generate training data ===")
 
 rcut  = 5.0u"Å"
 kgrid = [6, 6, 1]
-filter = FermiFilter() 
+filter = FermiFilter()
 cache_file = "training_data_cache.jld2"
 
 if isfile(cache_file)
@@ -36,11 +36,14 @@ else
     println("  No cache found, generating data ...")
     sys0 = build_graphene()
     Random.seed!(0)
-    syslist = [sys0; [perturb(sys0; ϵ = 0.02) for _ in 1:3]]
+    syslist = [sys0; [perturb(sys0; ϵ = 0.02) for _ in 1:1]]
     println("  $(length(syslist)) structures")
 
-    bs, λ_ref_list, ψ_ref_list, filter_list, proj_list, kw_list, G_list = build_ref_and_graph_lists_sph_graphene(
-    syslist, rcut, kgrid, filter; basis_name = "def2-SVP")
+    bs, λ_ref_list, ψ_ref_list, filter_list, proj_list, kw_list, G_list =
+        build_ref_and_graph_lists_sph_graphene(
+            syslist, rcut, kgrid, filter;
+            basis_name = "def2-SVP",
+        )
 
     println("  Saving cache to $cache_file ...")
     @save cache_file bs λ_ref_list ψ_ref_list filter_list proj_list kw_list G_list syslist
@@ -54,24 +57,25 @@ println("  nbas = $(bs.nbas), natoms = $(bs.natoms)")
 # ============================================================
 println("\n=== Step 2: Train ===")
 
-NORB       = 4
+NORB = 4
 
 ps, st, model = multilevel_train_H(
-    G_list, bs, NORB, rcut;
-    model_type    = :ace3c_B,
-    target_Dtot   = 6,
-    target_maxl   = 4,
-    target_ORD    = 2,
-    λ_ref_list    = λ_ref_list,
-    ψ_ref_list    = ψ_ref_list,
-    filter_list   = filter_list,
-    proj_list     = proj_list,
-    kw_list       = kw_list,
-    H_iterations  = 50,
-    seed          = 42,
-    verbose       = true,
+    G_list,
+    λ_ref_list,
+    ψ_ref_list,
+    proj_list,
+    kw_list,
+    bs,
+    NORB,
+    rcut;
+    filter = filter_list,
+    model_type      = :ace3c_B,
+    target_Dtot     = 6,
+    target_maxl     = 4,
+    target_ORD      = 2,
+    H_iterations    = 50,
+    verbose         = true,
 )
-
 
 println("\n  Training done.")
 
@@ -81,9 +85,15 @@ println("\n  Training done.")
 println("\n=== Step 3: Evaluate ===")
 
 for i in eachindex(G_list)
-    #err_H = RMSE_H(G_list[i], H_ref_list[i], model, ps, st, fermi_filter)
-    err_H = RMSE_H(Glist[i], λ_ref_list[i], ψ_ref_list[i], proj_list[i], 
-                   kw_list[i], filter_list[i], model, ps, st)
+    err_H = RMSE_H(
+        G_list[i],
+        λ_ref_list[i],
+        ψ_ref_list[i],
+        proj_list[i],
+        kw_list[i],
+        filter_list[i],
+        model, ps, st,
+    )
     println("  Structure $i  RMSE_H = $(round(err_H, digits=6))")
 end
 
@@ -92,10 +102,12 @@ end
 # ============================================================
 println("\n=== Step 4: Band structure ===")
 
-compute_and_save_bandstructures(G_list[1], syslist[1], model, ps, st;
+compute_and_save_bandstructures(
+    G_list[1], syslist[1], model, ps, st;
     kgrid      = [6, 6, 1],
     keep_bands = 4,
-    name       = "graphene_bands_rmseH.png")
+    name       = "graphene_bands_rmseH.png",
+)
 println("  Saved graphene_bands_rmseH.png")
 
 # ============================================================
@@ -105,18 +117,32 @@ println("\n=== Step 5: Predict on new structure ===")
 
 sys_pred = perturb(build_graphene(); ϵ = 0.02)
 
-bs_pred, λ_pred_ref_list, ψ_pred_ref_list, filter_pred_list, proj_pred_list, kw_pred_list, G_pred_list = build_ref_and_graph_lists_sph_graphene([sys_pred], rcut, kgrid, filter; basis_name = "def2-SVP")
+bs_pred, λ_pred_ref_list, ψ_pred_ref_list, filter_pred_list, proj_pred_list, kw_pred_list, G_pred_list =
+    build_ref_and_graph_lists_sph_graphene(
+        [sys_pred], rcut, kgrid, filter;
+        basis_name = "def2-SVP",
+    )
 
-st_pred   = update_basisset(st, bs_pred)
-out, _, _ = model(G_pred_list[1], ps, st_pred)
+st_pred = update_basisset(st, bs_pred)
+
+out, _ = model(G_pred_list[1], ps, st_pred)
 println("  Predicted $(length(out.λ)) k-points, $(length(out.λ[1])) bands each.")
 
-err_H_pred = RMSE_H(G_pred_list[i], λ_pred_ref_list[i], ψ_pred_ref_list[i], proj_pred_list[i], 
-                    kw_pred_list[i], filter_pred_list[i], model, ps, st)
+err_H_pred = RMSE_H(
+    G_pred_list[1],
+    λ_pred_ref_list[1],
+    ψ_pred_ref_list[1],
+    proj_pred_list[1],
+    kw_pred_list[1],
+    filter_pred_list[1],
+    model, ps, st_pred,
+)
 println("  New structure RMSE_H = $(round(err_H_pred, digits=6))")
 
-compute_and_save_bandstructures(G_pred_list[1], sys_pred, model, ps, st_pred;
+compute_and_save_bandstructures(
+    G_pred_list[1], sys_pred, model, ps, st_pred;
     kgrid      = [6, 6, 1],
-    keep_bands = keep_bands,
-    name       = "graphene_pred_rmseH.png")
+    keep_bands = 4,
+    name       = "graphene_pred_rmseH.png",
+)
 println("  Saved graphene_pred_rmseH.png")

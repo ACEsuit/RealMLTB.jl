@@ -65,9 +65,16 @@ function compute_and_save_bandstructures(G, sys, model, ps, st;
     elseif psp_type == "gth"
         psp = PseudoFamily("cp2k.nc.sr.$(xc_type).v0_1.semicore.gth")
     end
-    atoms = [ElementPsp(Symbol(species(p)), psp) for p in sys.particles]
-    funtionals = xc_type == "lda" ? LDA() : PBE()
-    modeldft = model_DFT(lattice, atoms, positions; functionals, temperature)
+    element_cache = Dict{Symbol, ElementPsp}()
+    atoms = map(sys.particles) do p
+        sym = Symbol(species(p))
+        if !haskey(element_cache, sym)
+            element_cache[sym] = ElementPsp(sym, psp)
+        end
+        return element_cache[sym]
+    end
+    functional = xc_type == "lda" ? LDA() : PBE()
+    modeldft = model_DFT(lattice, atoms, positions; functionals=functional, temperature)
     basis    = PlaneWaveBasis(modeldft; Ecut, kgrid)
     scfres   = self_consistent_field(basis; tol = 1e-8, callback = (_) -> nothing)
 
@@ -88,13 +95,13 @@ function compute_and_save_bandstructures(G, sys, model, ps, st;
         graph_data = merge(G.graph_data, (; klist = kpoints_physical)),
     )
 
-    predict = model(G2, ps, st)[1] 
+    predict = model(G2, ps, st)[1]
     if train_type == "bands"
         # ML predictions: model returns Vector{Vector{Float64}}, one per k-point
         # length = nk, each element = Vector of eigenvalues
         # Wrap predictions into a DFTK-compatible bands NamedTuple
         # eigenvalues field must be a vector of vectors (one per k-point, already sorted)
-        eigenvalues = [p[1:min(keep_bands, length(p))] for p in predict]
+        eigenvalues = [p[1:min(keep_bands, length(p))] for p in predict[1]]
     elseif train_type == "hamiltonian"
         # ML predictions: model returns Vector{Matrix{ComplexF64}}, one per k-point
         # length = nk, each element = TB Hamiltonian matrix in k-space

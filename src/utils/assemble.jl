@@ -190,148 +190,15 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
     return (vH, vS), pullback
 end
 
-# ---------------------------------------------------------------------------
-# generate_λ: solve generalised eigenvalue problem H C = S C Λ
-# via Cholesky factorisation of S (avoids full generalised solver).
-# ---------------------------------------------------------------------------
-using ChainRulesCore: @thunk
-
-function generate_λ(H::AbstractMatrix, S::AbstractMatrix)
-    H_herm = Hermitian((H + H') / 2)
-    S_herm = Hermitian((S + S') / 2)
-    F = eigen(S_herm)
-    tol  = maximum(abs.(F.values)) * size(S, 1) * eps(real(eltype(S)))
-    keep = F.values .> tol
-    V    = F.vectors[:, keep]
-    d    = F.values[keep]
-    L    = V * Diagonal(sqrt.(d))
-    H_red = Hermitian(L' * H_herm * L)
-    return real.(eigvals(H_red))
+function generate_λ(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
+   L = cholesky(S).L           # S = LLᵀ
+   A = L \ (H / L')            # i.e., A = L⁻¹ H L⁻ᵀ
+   AA = (A + A')/2
+   λ = GenericLinearAlgebra.eigen(AA).values
+   return λ
 end
 
-function generate_λ(Hlist::AbstractVector, Slist::AbstractVector)
-    return [generate_λ(Hlist[i], Slist[i]) for i in eachindex(Hlist)]
-end
-
-function ChainRulesCore.rrule(::typeof(generate_λ), H::AbstractMatrix, S::AbstractMatrix)
-    H_herm = Hermitian((H + H') / 2)
-    S_herm = Hermitian((S + S') / 2)
-
-    # 保护：NaN/Inf 时返回零梯度
-    if !all(isfinite, H_herm) || !all(isfinite, S_herm)
-        λ_dummy = zeros(real(eltype(H)), size(H, 1))
-        function pullback_nan(Δλ)
-            return NoTangent(),
-                   zeros(eltype(H), size(H)),
-                   zeros(eltype(S), size(S))
-        end
-        return λ_dummy, pullback_nan
-    end
-
-    FS   = eigen(S_herm)
-    tol  = maximum(abs.(FS.values)) * size(S, 1) * eps(real(eltype(S)))
-    keep = FS.values .> tol
-
-    if !any(keep)
-        λ_dummy = zeros(real(eltype(H)), size(H, 1))
-        function pullback_empty(Δλ)
-            return NoTangent(),
-                   zeros(eltype(H), size(H)),
-                   zeros(eltype(S), size(S))
-        end
-        return λ_dummy, pullback_empty
-    end
-
-    V   = FS.vectors[:, keep]
-    d   = FS.values[keep]
-    sqd = sqrt.(d)
-    L   = V * Diagonal(sqd)
-
-    H_red = Hermitian(L' * H_herm * L)
-
-    if !all(isfinite, H_red)
-        λ_dummy = zeros(real(eltype(H)), size(H, 1))
-        function pullback_nan2(Δλ)
-            return NoTangent(),
-                   zeros(eltype(H), size(H)),
-                   zeros(eltype(S), size(S))
-        end
-        return λ_dummy, pullback_nan2
-    end
-
-    FH    = eigen(H_red)
-    λ     = real.(FH.values)
-    C_red = FH.vectors
-    C     = L * C_red
-
-    function pullback(Δλ)
-        Δλ_real = real.(unthunk(Δλ))
-
-        H̄ = @thunk begin
-            G_mat = C * Diagonal(Δλ_real) * C'
-            real.((G_mat + G_mat') / 2)
-        end
-
-        S̄ = @thunk begin
-            function _lambda_from_S(Svec)
-                S2  = reshape(Svec, size(S))
-                S2h = Hermitian((S2 + S2') / 2)
-                if !all(isfinite, S2h)
-                    return zeros(real(eltype(S)), length(λ))
-                end
-                FS2   = eigen(S2h)
-                keep2 = FS2.values .> tol
-                if !any(keep2)
-                    return zeros(real(eltype(S)), length(λ))
-                end
-                V2    = FS2.vectors[:, keep2]
-                d2    = FS2.values[keep2]
-                L2    = V2 * Diagonal(sqrt.(d2))
-                H_red2 = Hermitian(L2' * H_herm * L2)
-                if !all(isfinite, H_red2)
-                    return zeros(real(eltype(S)), length(λ))
-                end
-                return real.(eigvals(H_red2))
-            end
-            gs = Zygote.gradient(s -> dot(Δλ_real, _lambda_from_S(s)), vec(S))[1]
-            if gs === nothing || !all(isfinite, gs)
-                zeros(eltype(S), size(S))
-            else
-                reshape(real.(gs), size(S))
-            end
-        end
-
-        return NoTangent(), H̄, S̄
-    end
-
-    return λ, pullback
-end
-
-function ChainRulesCore.rrule(::typeof(generate_λ),
-                               Hlist::AbstractVector,
-                               Slist::AbstractVector)
-    results_and_pbs = [ChainRulesCore.rrule(generate_λ, Hlist[i], Slist[i])
-                       for i in eachindex(Hlist)]
-    λlist = [r[1] for r in results_and_pbs]
-    pbs   = [r[2] for r in results_and_pbs]
-
-    function pullback(Δλlist_thunk)
-        Δλlist = unthunk(Δλlist_thunk)
-        H̄list  = Vector{typeof(Hlist[1])}(undef, length(Hlist))
-        S̄list  = Vector{typeof(Slist[1])}(undef, length(Slist))
-        for i in eachindex(Hlist)
-            Δλi = unthunk(Δλlist[i])
-            if Δλi isa ChainRulesCore.ZeroTangent || Δλi isa ChainRulesCore.NoTangent
-                H̄list[i] = zero(Hlist[i])
-                S̄list[i] = zero(Slist[i])
-            else
-                _, H̄i, S̄i = pbs[i](Δλi)
-                H̄list[i]   = unthunk(H̄i)
-                S̄list[i]   = unthunk(S̄i)
-            end
-        end
-        return NoTangent(), H̄list, S̄list
-    end
-
-    return λlist, pullback
+function generate_λ(Hlist::AbstractVector{TH}, Slist::AbstractVector{TS}) where {TH, TS}
+   λlist = [generate_λ(Hlist[i], Slist[i]) for i in 1:length(Hlist)]
+   return λlist
 end

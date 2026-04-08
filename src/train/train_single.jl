@@ -1,73 +1,96 @@
+using LinearAlgebra: norm
 using Zygote
 using Optim
-using Optimisers
 using Optimisers: destructure
 import LuxCore
 
 export train
 
-# ===========================================================================
-# Single-sample train
-#
-# Phase 1: Adam warm-up        — eigenvalue loss (λ)
-# Phase 2: BFGS refinement     — eigenvalue loss (λ)
-# Phase 3: BFGS fine-tune      — Hamiltonian operator-norm loss (RMSE_H)
-#          only runs if H_ref_AO and filter are provided
-# ===========================================================================
-function train(G, model, ps, st, keep_bands, λ_ref;
-               iterations::Int      = 1000,
-               adam_iterations::Int = 200,
-               adam_lr::Float64     = 1e-3,
-               grad_clip::Float64   = 10.0,
-               λ_reg                = 1e-4,
-               # --- Phase 3 kwargs (optional) ---
-               H_ref_AO             = nothing,   # reference H in AO basis
-               filter::Union{Function,Nothing} = nothing,  # spectral filter
-               H_iterations::Int    = 500,        # BFGS steps for Phase 3
-               H_reg                = 1e-4)
-
-    # -----------------------------------------------------------------------
-    # Phase 1: Adam warm-up (eigenvalue loss)
-    # -----------------------------------------------------------------------
+function _adam_warmup(lossfun, ps;
+    adam_iterations::Int = 200,
+    adam_lr::Float64 = 1e-3,
+    grad_clip::Float64 = 10.0,
+    patience::Int = 100,
+    β1::Float64 = 0.9,
+    β2::Float64 = 0.999,
+    ε::Float64 = 1e-8,
+    print_every::Int = 50,
+)
     println("    [Phase 1 - Adam warm-up: $adam_iterations steps, lr=$adam_lr]")
-    opt       = Optimisers.Adam(adam_lr)
-    opt_state = Optimisers.setup(opt, ps)
-    ps_cur    = ps
 
-    for step in 1:adam_iterations
-        val, gs = Zygote.withgradient(
-            p -> RMSE(G, λ_ref, model, p, st; keep_bands=keep_bands, λ_reg=λ_reg),
-            ps_cur)
-        g = gs[1]
-        x_g, re_g = destructure(g)
-        gnorm = norm(x_g)
-        if gnorm > grad_clip
-            x_g .*= (grad_clip / gnorm)
-            g = re_g(x_g)
+    θ0_raw, re = destructure(ps)
+    Tparam = eltype(θ0_raw)
+    θ = Float64.(θ0_raw)
+
+    m = zeros(Float64, length(θ))
+    v = zeros(Float64, length(θ))
+
+    best_loss = Inf
+    best_θ = copy(θ)
+    history = Float64[]
+    no_improve = 0
+
+    f(θvec) = begin
+        ps_cur = re(Tparam.(θvec))
+        Float64(lossfun(ps_cur))
+    end
+
+    for t in 1:adam_iterations
+        val, back = Zygote.pullback(f, θ)
+        g = first(back(1.0))
+
+        gnorm = norm(g)
+        if gnorm > grad_clip && gnorm > 0
+            g = g .* (grad_clip / gnorm)
         end
-        opt_state, ps_cur = Optimisers.update!(opt_state, ps_cur, g)
-        if step % 50 == 0 || step == 1
-            println("      Adam step $step  loss = $(round(val, digits=4))")
+
+        m .= β1 .* m .+ (1 - β1) .* g
+        v .= β2 .* v .+ (1 - β2) .* (g .^ 2)
+
+        mhat = m ./ (1 - β1^t)
+        vhat = v ./ (1 - β2^t)
+
+        θ .-= adam_lr .* mhat ./ (sqrt.(vhat) .+ ε)
+
+        push!(history, val)
+
+        if val < best_loss
+            best_loss = val
+            best_θ .= θ
+            no_improve = 0
+        else
+            no_improve += 1
+        end
+
+        if t % print_every == 0 || t == 1
+            println("      Adam step $t  loss = $(round(val, digits=6))  |g| = $(round(gnorm, digits=6))")
+        end
+
+        if no_improve >= patience
+            println("      Adam early stop at step $t")
+            break
         end
     end
 
-    # -----------------------------------------------------------------------
-    # Phase 2: BFGS refinement (eigenvalue loss)
-    # -----------------------------------------------------------------------
-    println("    [Phase 2 - BFGS refinement: $iterations steps]")
-    x0_f32, re = destructure(ps_cur)
-    x0 = Float64.(x0_f32)
+    best_ps = re(Tparam.(best_θ))
+    return best_ps, best_loss, history
+end
 
-    f2(x) = Float64(RMSE(G, λ_ref, model, re(eltype(x0_f32).(x)), st;
-                         keep_bands=keep_bands, λ_reg=λ_reg))
-    function g2!(storage, x)
-        g = Zygote.gradient(
-            xx -> RMSE(G, λ_ref, model, re(eltype(x0_f32).(xx)), st;
-                       keep_bands=keep_bands, λ_reg=λ_reg), x)[1]
+function _bfgs_refine(lossfun, ps; iterations::Int = 1000)
+    println("    [BFGS: $iterations steps]")
+
+    x0_raw, re = destructure(ps)
+    Tparam = eltype(x0_raw)
+    x0 = Float64.(x0_raw)
+
+    f(x) = Float64(lossfun(re(Tparam.(x))))
+
+    function g!(storage, x)
+        g = Zygote.gradient(xx -> lossfun(re(Tparam.(xx))), x)[1]
         storage .= Float64.(g)
     end
 
-    options2 = Optim.Options(
+    options = Optim.Options(
         g_tol       = 1e-6,
         f_abstol    = 1e-10,
         f_reltol    = 1e-10,
@@ -75,155 +98,76 @@ function train(G, model, ps, st, keep_bands, λ_ref;
         show_trace  = true,
         store_trace = true,
     )
-    result2   = Optim.optimize(f2, g2!, x0, Optim.BFGS(), options2)
-    x_opt     = Optim.minimizer(result2)
-    ps_cur    = re(x_opt)
-    x_history = [result2.trace[i].value for i in 1:length(result2.trace)]
 
-    # -----------------------------------------------------------------------
-    # Phase 3: BFGS fine-tune (Hamiltonian operator-norm loss)
-    # Only runs when H_ref_AO and filter are supplied.
-    # -----------------------------------------------------------------------
-    if H_ref_AO !== nothing && filter !== nothing
-        println("    [Phase 3 - BFGS fine-tune with RMSE_H: $H_iterations steps]")
+    result  = Optim.optimize(f, g!, x0, Optim.BFGS(), options)
+    x_opt   = Optim.minimizer(result)
+    ps_cur  = re(Tparam.(x_opt))
+    history = [tr.value for tr in result.trace]
 
-        x0_H, re_H = destructure(ps_cur)
-        x0_H = Float64.(x0_H)
-
-        f3(x) = Float64(RMSE_H(G, H_ref_AO, model,
-                                re_H(eltype(x0_H).(x)), st, filter; H_reg=H_reg))
-        function g3!(storage, x)
-            g = Zygote.gradient(
-                xx -> RMSE_H(G, H_ref_AO, model,
-                             re_H(eltype(x0_H).(xx)), st, filter; H_reg=H_reg), x)[1]
-            storage .= Float64.(g)
-        end
-
-        options3 = Optim.Options(
-            g_tol       = 1e-6,
-            f_abstol    = 1e-10,
-            f_reltol    = 1e-10,
-            iterations  = H_iterations,
-            show_trace  = true,
-            store_trace = true,
-        )
-        result3    = Optim.optimize(f3, g3!, x0_H, Optim.BFGS(), options3)
-        x_opt_H    = Optim.minimizer(result3)
-        ps_cur     = re_H(x_opt_H)
-        x_history  = vcat(x_history,
-                          [result3.trace[i].value for i in 1:length(result3.trace)])
-
-        println("    Phase 3 done. Final RMSE_H = $(round(f3(x_opt_H), digits=6))")
-    else
-        println("    [Phase 3 skipped — H_ref_AO or filter not provided]")
-    end
-
-    return ps_cur, x_history
+    println("      final loss = $(round(f(x_opt), digits=6))")
+    return ps_cur, history, result
 end
 
-# ===========================================================================
-# Multi-sample train
-#
-# Same three-phase structure, just loops over Glist / H_ref_AO_list.
-# ===========================================================================
-function train(Glist::AbstractVector, model, ps, st, keep_bands, λ_ref_list;
-               iterations::Int      = 1000,
-               adam_iterations::Int = 200,
-               adam_lr::Float64     = 1e-3,
-               grad_clip::Float64   = 10.0,
-               λ_reg                = 1e-4,
-               # --- Phase 3 kwargs (optional) ---
-               H_ref_AO_list        = nothing,
-               filter::Union{Function,Nothing} = nothing,
-               H_iterations::Int    = 500,
-               H_reg                = 1e-4)
+function train(data, model, ps, st, keep_bands, λ_ref;
+    iterations::Int        = 1000,
+    adam_iterations::Int   = 200,
+    adam_lr::Float64       = 1e-3,
+    grad_clip::Float64     = 10.0,
+    adam_patience::Int     = 100,
+    ψ_ref                  = nothing,
+    proj                   = nothing,
+    kweights               = nothing,
+    filter        = nothing,
+    H_iterations::Int      = 500,
+)
+    # ------------------------------------------------------------------------
+    # Phase 1 / 2: eigenvalue RMSE
+    # ------------------------------------------------------------------------
+    loss_rmse(p) = RMSE(data, λ_ref, model, p, st; keep_bands=keep_bands)
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Adam warm-up (eigenvalue loss)
-    # -----------------------------------------------------------------------
-    println("    [Phase 1 - Adam warm-up: $adam_iterations steps, lr=$adam_lr]")
-    opt       = Optimisers.Adam(adam_lr)
-    opt_state = Optimisers.setup(opt, ps)
-    ps_cur    = ps
-
-    for step in 1:adam_iterations
-        val, gs = Zygote.withgradient(
-            p -> RMSE(Glist, λ_ref_list, model, p, st;
-                      keep_bands=keep_bands, λ_reg=λ_reg),
-            ps_cur)
-        g = gs[1]
-        x_g, re_g = destructure(g)
-        gnorm = norm(x_g)
-        if gnorm > grad_clip
-            x_g .*= (grad_clip / gnorm)
-            g = re_g(x_g)
-        end
-        opt_state, ps_cur = Optimisers.update!(opt_state, ps_cur, g)
-        if step % 50 == 0 || step == 1
-            println("      Adam step $step  loss = $(round(val, digits=4))")
-        end
-    end
-
-    # -----------------------------------------------------------------------
-    # Phase 2: BFGS refinement (eigenvalue loss)
-    # -----------------------------------------------------------------------
-    println("    [Phase 2 - BFGS refinement: $iterations steps]")
-    x0, re = destructure(ps_cur)
-
-    f2(x) = RMSE(Glist, λ_ref_list, model, re(x), st;
-                 keep_bands=keep_bands, λ_reg=λ_reg)
-    function g2!(storage, x)
-        storage .= Zygote.gradient(f2, x)[1]
-    end
-
-    options2 = Optim.Options(
-        g_tol       = 1e-6,
-        f_abstol    = 1e-10,
-        f_reltol    = 1e-10,
-        iterations  = iterations,
-        show_trace  = true,
-        store_trace = true,
+    ps_cur, adam_best_loss, hist1 = _adam_warmup(
+        loss_rmse, ps;
+        adam_iterations = adam_iterations,
+        adam_lr         = adam_lr,
+        grad_clip       = grad_clip,
+        patience        = adam_patience,
     )
-    result2   = Optim.optimize(f2, g2!, x0, Optim.BFGS(), options2)
-    x_opt     = Optim.minimizer(result2)
-    ps_cur    = re(x_opt)
-    x_history = [result2.trace[i].value for i in 1:length(result2.trace)]
 
-    # -----------------------------------------------------------------------
-    # Phase 3: BFGS fine-tune (Hamiltonian operator-norm loss)
-    # -----------------------------------------------------------------------
-    if H_ref_AO_list !== nothing && filter !== nothing
-        println("    [Phase 3 - BFGS fine-tune with RMSE_H: $H_iterations steps]")
+    println("    Phase 1 done. Best RMSE = $(round(adam_best_loss, digits=6))")
 
-        x0_H, re_H = destructure(ps_cur)
-        x0_H = Float64.(x0_H)
+    ps_cur, hist2, _ = _bfgs_refine(
+        loss_rmse, ps_cur;
+        iterations = iterations,
+    )
 
-        f3(x) = Float64(RMSE_H(Glist, H_ref_AO_list, model,
-                                re_H(eltype(x0_H).(x)), st, filter; H_reg=H_reg))
-        function g3!(storage, x)
-            g = Zygote.gradient(
-                xx -> RMSE_H(Glist, H_ref_AO_list, model,
-                             re_H(eltype(x0_H).(xx)), st, filter; H_reg=H_reg), x)[1]
-            storage .= Float64.(g)
-        end
+    x_history = vcat(hist1, hist2)
 
-        options3 = Optim.Options(
-            g_tol       = 1e-6,
-            f_abstol    = 1e-10,
-            f_reltol    = 1e-10,
-            iterations  = H_iterations,
-            show_trace  = true,
-            store_trace = true,
+    # ------------------------------------------------------------------------
+    # Phase 3: PW-space Hamiltonian loss
+    # ------------------------------------------------------------------------
+    if ψ_ref !== nothing &&
+       proj !== nothing &&
+       kweights !== nothing &&
+       filter !== nothing
+
+        loss_rmse_H(p) = RMSE_H(
+            data,
+            λ_ref,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
+            model, p, st,
         )
-        result3   = Optim.optimize(f3, g3!, x0_H, Optim.BFGS(), options3)
-        x_opt_H   = Optim.minimizer(result3)
-        ps_cur    = re_H(x_opt_H)
-        x_history = vcat(x_history,
-                         [result3.trace[i].value for i in 1:length(result3.trace)])
 
-        println("    Phase 3 done. Final RMSE_H = $(round(f3(x_opt_H), digits=6))")
+        ps_cur, hist3, _ = _bfgs_refine(
+            loss_rmse_H, ps_cur;
+            iterations = H_iterations,
+        )
+
+        x_history = vcat(x_history, hist3)
     else
-        println("    [Phase 3 skipped — H_ref_AO_list or filter not provided]")
+        println("    [Phase 3 skipped — ψ_ref / proj / kweights / filter not fully provided]")
     end
 
     return ps_cur, x_history
