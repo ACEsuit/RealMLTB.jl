@@ -74,7 +74,7 @@ function (l::Simple3Center{NORB,NBAS,NATOM})(G, ps, st) where {NORB,NBAS,NATOM}
     natom_actual = EquivariantTensors.nnodes(G)
     Wb   = kron_I_atoms(natom_actual, ps.Wb)
     vH, vS = _3center_triplet(G, st.basisset, ps.Wv, Wb)
-    return (G, vH, vS), ps, st
+    return (G, vH, vS, Wb), ps, st
 end
 
 # ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ function (l::ACEv3Center{M,B,NORB,NBAS,NATOM})(G, ps, st) where {M,B,NORB,NBAS,N
     Wb = kron_I_atoms(natom_actual, ps.Wb)
     vH, vS = _3center_triplet(G, st.basisset, Wv, Wb)
     new_st = (ace=st_ace, basisset=st.basisset)
-    return (G, vH, vS), ps, new_st
+    return (G, vH, vS, Wb), ps, new_st
 end
 
 # ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ function (l::ACE3CenterCaseA)(G, ps, st)
 
     vH, vS = _3center_triplet(G, st.basisset, Wv, Wb)
     new_st = (acev=st_v, wpsi=st_ψ, basisset=st.basisset)
-    return (G, vH, vS), ps, new_st
+    return (G, vH, vS, Wb), ps, new_st
 end
 
 # ---------------------------------------------------------------------------
@@ -211,5 +211,5 @@ function (l::ACE3CenterCaseB{Mv,Mψ,B,NORB,NBAS,NATOM})(G, ps, st) where {Mv,Mψ
 
     vH, vS = _3center_triplet(G, st.basisset, Wv, Wb)
     new_st = (acev=st_v, wpsi=st_ψ, basisset=st.basisset)
-    return (G, vH, vS), ps, new_st
+    return (G, vH, vS, Wb), ps, new_st
 end

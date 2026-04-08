@@ -51,61 +51,6 @@ function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
     return sqrt(total_sq / total_n)
 end
 
-# ---------------------------------------------------------------------------
-# Extract Wb from layer_1
-# ---------------------------------------------------------------------------
-
-"""
-    _extract_Wb(model, G, ps, st)
-
-Extract the current orbital mixing / basis expansion matrix `Wb` from
-`model.layers.layer_1`.
-
-For `Simple3Center` and `ACEv3Center`, `Wb` is read directly from parameters.
-For `ACE3CenterCaseA/B`, `Wb` is assembled from the `wpsi` branch.
-"""
-function _extract_Wb(model, G, ps, st)
-    layer1 = model.layers.layer_1
-    ps1 = ps.layer_1
-    st1 = st.layer_1
-    return _compute_Wb(layer1, G, ps1, st1)
-end
-
-function _compute_Wb(l::Simple3Center, G, ps, st)
-    natom = EquivariantTensors.nnodes(G)
-    return kron_I_atoms(natom, ps.Wb)
-end
-
-function _compute_Wb(l::ACEv3Center, G, ps, st)
-    natom = EquivariantTensors.nnodes(G)
-    return kron_I_atoms(natom, ps.Wb)
-end
-
-function _compute_Wb(l::ACE3CenterCaseA, G, ps, st)
-    val_ψ, _ = _ace_Wv_forward(l.wpsi_model, G, ps.wpsi, st.wpsi)
-
-    val_ψ_scalar = if val_ψ isa AbstractMatrix
-        val_ψ
-    elseif val_ψ isa Tuple && length(val_ψ) == 1
-        val_ψ[1]
-    elseif val_ψ isa NamedTuple
-        getfield(val_ψ, first(fieldnames(typeof(val_ψ))))
-    else
-        error("_compute_Wb CaseA: unexpected val_ψ type $(typeof(val_ψ))")
-    end
-
-    return assemble_Wpsi_caseA(val_ψ_scalar, l.n_channels_φ, l.nψ)
-end
-
-function _compute_Wb(l::ACE3CenterCaseB{Mv,Mψ,B,NORB,NBAS,NATOM}, G, ps, st) where {Mv,Mψ,B,NORB,NBAS,NATOM}
-    val_ψ, _ = _ace_Wv_forward(l.wpsi_model, G, ps.wpsi, st.wpsi)
-    return assemble_Wpsi_caseB(val_ψ, l.n_channels_φ, NORB)
-end
-
-# ---------------------------------------------------------------------------
-# Hamiltonian loss in PW space
-# ---------------------------------------------------------------------------
-
 function RMSE_H(Glist::AbstractVector,
                  λ_ref_list::AbstractVector,
                  ψ_ref_list::AbstractVector,
@@ -134,21 +79,30 @@ function RMSE_H(Glist::AbstractVector,
     return total / n
 end
 
-function RMSE_H(G,
-                 λ_ref,
-                 ψ_ref,
-                 proj,
-                 kweights,
-                 filter,
-                 model, ps, st)
+struct FermiFilter{T<:Real}
+    μ::T       # Fermi level
+    σ::T       # smoothing parameter
+    width::T   # half-width of the plateau
+end
+FermiFilter() = FermiFilter(0.0, 0.1, 0.2)
 
-    # H_k from full model forward (gradients flow through ps → vH,vS → H_R0)
+function eval_filter(x, f)
+    rise = 0.5 * (1 + erf((x - f.μ + f.width) / f.σ))
+    fall = 0.5 * (1 - erf((x - f.μ - f.width) / f.σ))
+
+    return rise + fall - 1
+end
+
+function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st)
+
     result = model(G, ps, st)
     out = result[1]
     H_k = out.Hout
+    Wb  = out.Wb
 
-    # Wb re-computed from layer_1 (gradients flow through ps → Wb)
-    Wb = _extract_Wb(model, G, ps, st)
+    filter_fn = let f = filter
+        x -> eval_filter(x, f)
+    end
 
     Δop = sum(enumerate(kweights)) do (ik, ikw)
         Jk = proj[ik] * Wb'
@@ -157,13 +111,9 @@ function RMSE_H(G,
         H_ik = (H_k[ik] + H_k[ik]') / 2
         H_ik = ihS * H_ik * ihS
         H_ik = (H_ik + H_ik') / 2
- 
-        #H_pw = Jk * H_ik * Jk'
-        #H_pw = (H_pw + H_pw') / 2
-        #fH_k_proj = mat_fun(filter, H_pw)
 
-        fH_k_proj = Jk * mat_fun(filter, H_ik) * Jk' 
-        fH_k_ref = mat_fun_eigen(filter, λ_ref[ik], ψ_ref[ik])
+        fH_k_proj = Jk * mat_fun(filter_fn, H_ik) * Jk'  
+        fH_k_ref  = mat_fun_eigen(filter_fn, λ_ref[ik], ψ_ref[ik])
         ΔfH_k = fH_k_ref - fH_k_proj
 
         ikw * opnorm(ΔfH_k)

@@ -27,6 +27,8 @@ function eval_filter(x, f::FermiFilter)
     return rise + fall - 1
 end
 
+(f::FermiFilter)(x::Real) = eval_filter(x, f)
+
 # ---------------------------------------------------------------------------
 # Build the matrices of projectors onto the spherical atomic orbitals.
 #

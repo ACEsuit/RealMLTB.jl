@@ -15,10 +15,11 @@ struct AsmTrip2Dense <: Lux.AbstractLuxLayer end
 LuxCore.initialparameters(::AbstractRNG, ::AsmTrip2Dense) = NamedTuple()
 LuxCore.initialstates(::AbstractRNG, ::AsmTrip2Dense)     = NamedTuple()
 
-function (l::AsmTrip2Dense)((G, vH, vS), ps, st)
+function (l::AsmTrip2Dense)(x, ps, st)
+    G, vH, vS, Wb = x
     klist = G.graph_data.klist
-    out   = _assemble_dense(G, vH, vS, klist)
-    return out, st
+    Hout, Sout = _assemble_dense(G, vH, vS, klist)
+    return (Hout, Sout, Wb), st
 end
 
 # ---------------------------------------------------------------------------
