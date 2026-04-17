@@ -24,7 +24,7 @@ function compare_bandstructure(band_data::NamedTuple, band_data2::NamedTuple;
 
     # Reference bands (blue)
     first_band = true
-    for σ in 1:data.n_spin, iband in 1:data.n_bands, branch in data.kbranches
+    for σ in 1:data.n_spin, iband in 4:5, branch in data.kbranches
         energies = (data.eigenvalues[:, iband, σ][branch] .- eshift) .* to_unit
         lines!(ax, data.kdistances[branch], energies,
               color = :blue, alpha = 0.8,

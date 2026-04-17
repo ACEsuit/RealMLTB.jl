@@ -69,8 +69,8 @@ end
 function generate_data_graphene(sys, kgrid, filter::FermiFilter, 
                                 bs_ao::BasisSet; Ecut=15, 
                                 nbands_plus=10, temperature=1e-3, 
-                                kline_density=10u"bohr",
-                                cone_scale=5)
+                                kline_density=15u"bohr",
+                                cone_scale=3)
     lattice = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
     C = ElementPsp(:C, PseudoFamily("cp2k.nc.sr.pbe.v0_1.semicore.gth"))
@@ -95,10 +95,11 @@ function generate_data_graphene(sys, kgrid, filter::FermiFilter,
 
     # Extract information near the Dirac (K) point
     kpath = irrfbz_path(model; dim=2, space_group_number=13)
-    K = SVector{3,Float64}(kpath.points[:K]..., 0.0)
     kinter = DFTK.Brillouin.interpolate(kpath, density=austrip(kline_density))
     kcoords = [SVector{3,Float64}(x...,0.0) for x in kinter.kpaths[1]]
-    dist = norm(basis.model.recip_lattice[:,1]) / cone_scale
+    K = SVector{3,Float64}(kpath.points[:K]..., 0.0)
+    M = SVector{3,Float64}(kpath.points[:M]..., 0.0)
+    dist = norm(basis.model.recip_lattice * (K-M)) / cone_scale
     Kind = findall(x -> norm(basis.model.recip_lattice * (K-x)) < dist, kcoords)
     bs_K = PlaneWaveBasis(basis, ExplicitKpoints(vcat(kcoords[Kind],[-K])))
     λs_K, ψs_K = extract_eigen(bs_K, nbands; ρ=scfres.ρ)

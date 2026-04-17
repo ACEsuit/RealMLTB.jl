@@ -209,8 +209,7 @@ function _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
 end
 
 function _prepare_level_parameters(i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
-    embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter,
-    cone_w::Float64, gap_w::Float64, filter_σ::Float64)
+    embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter)
     if i == 1 || isnothing(embed_func)
         verbose && println("    Init: random")
         return ps_init, st_init
@@ -221,7 +220,7 @@ function _prepare_level_parameters(i, verbose, prev_model, prev_ps, current_mode
 
     if verbose
         if _phase3_enabled(ψ_ref, proj, kweights, filter)
-            err0 = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, current_model, ps_warm, st_init; cone_w, gap_w, filter_σ)
+            err0 = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, current_model, ps_warm, st_init; )
             println("    RMSE_H after warm-start: $err0")
         else
             err0 = RMSE(G, λ_ref, current_model, ps_warm, st_init; keep_bands = keep_bands)
@@ -260,17 +259,17 @@ function _train_level(G, λ_ref, model, ps, st, keep_bands;
     return ps_opt, history
 end
 
-function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; H_iterations::Int, cone_w::Float64, gap_w::Float64, filter_σ::Float64)
-    loss_H(p) = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, p, st; cone_w, gap_w, filter_σ)
+function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; H_iterations::Int, cone_w::Float64, filter_σ::Float64)
+    loss_H(p) = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, p, st; cone_w, filter_σ)
     ps_opt, history, _ = _bfgs_refine(loss_H, ps; iterations = H_iterations)
     return ps_opt, history
 end
 
-function _report_level_done(verbose, i, G, λ_ref, model, ps, st, keep_bands, ψ_ref, proj, kweights, filter, cone_w, gap_w, filter_σ)
+function _report_level_done(verbose, i, G, λ_ref, model, ps, st, keep_bands, ψ_ref, proj, kweights, filter, cone_w, filter_σ)
     verbose || return
 
     if _phase3_enabled(ψ_ref, proj, kweights, filter)
-        err_H = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; cone_w, gap_w, filter_σ)
+        err_H = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; cone_w, filter_σ)
         println("    Done Level $i. RMSE_H: $err_H")
     else
         err1 = RMSE(G, λ_ref, model, ps, st; keep_bands = keep_bands)
@@ -327,7 +326,6 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
         current_ps, current_st = _prepare_level_parameters(
             i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
             embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter,
-            1.0, 1.0, 1.0
         )
 
         verbose && println("    Training: $base_iterations BFGS iterations, $adam_iterations Adam steps")
@@ -347,7 +345,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
 
         _report_level_done(
             verbose, i, G, λ_ref, current_model, current_ps, current_st, keep_bands,
-            ψ_ref, proj, kweights, filter, 1.0, 1.0, 1.0
+            ψ_ref, proj, kweights, filter, 1.0, 1.0,
         )
 
         prev_model = current_model
@@ -371,7 +369,6 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     target_ORD::Int = 3,
     H_iterations::Int = 500,
     cone_w::Float64 = 1.0,
-    gap_w::Float64 = 1.0,
     filter_σ::Float64 = 0.5,
     verbose::Bool = true,
     embed_func = nothing,
@@ -409,7 +406,6 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
         current_ps, current_st = _prepare_level_parameters(
             i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
             embed_func, G, λ_ref, 1, ψ_ref, proj, kweights, filter,
-            cone_w, gap_w, filter_σ
         )
 
         verbose && println("    Training: $H_iterations BFGS steps on RMSE_H")
@@ -419,13 +415,12 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
             current_model, current_ps, current_st;
             H_iterations = H_iterations,
             cone_w = cone_w,
-            gap_w = gap_w,
             filter_σ = filter_σ
         )
 
         _report_level_done(
             verbose, i, G, λ_ref, current_model, current_ps, current_st, 1,
-            ψ_ref, proj, kweights, filter, cone_w, gap_w, filter_σ
+            ψ_ref, proj, kweights, filter, cone_w, filter_σ
         )
 
         prev_model = current_model

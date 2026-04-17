@@ -63,7 +63,7 @@ function RMSE_H(Glist::AbstractVector,
                 kw_list::AbstractVector,
                 filter_list::AbstractVector,
                 model, ps, st; 
-                cone_w=1.0, gap_w=1.0, 
+                cone_w=1.0, 
                 filter_σ=0.5)
 
     n = length(Glist)
@@ -82,7 +82,7 @@ function RMSE_H(Glist::AbstractVector,
                         kw_list[i],
                         filter_list[i],
                         model, ps, st; 
-                        cone_w, gap_w, 
+                        cone_w,
                         filter_σ)
     end
 
@@ -112,7 +112,7 @@ end
 # Hamiltonian RMSE (single structure)
 # ---------------------------------------------------------------------------
 function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; 
-                cone_w=1.0, gap_w=1.0, filter_σ=0.5)
+                cone_w=1.0, filter_σ=0.5)
 
     result = model(G, ps, st)
     out    = result[1]
@@ -156,18 +156,12 @@ function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st;
         Δcone /= 2nbands * nsym
     end
 
-    # train the band gap
-    Δgap = 0.0
-    if gap_w > 0
-        gap_ref = [x[nbands+1]-x[nbands] for x in λ_ref_cone]
-        gap_pred = [x[nbands+1]-x[nbands] for x in λ_pred_cone]
-        Δgap = sum(abs2, gap_ref - gap_pred) / nsym
-    end
+    # train the orthogonality for compressed orbitals
+    # orth_w = 0.5
+    # Δorth = 0.0
+    # if orth_w > 0
+    #     Δorth = sum(x->norm(x - I), out.Sout) / length(out.Hout)
+    # end
 
-    # train the orthonormality for compressed orbitals
-    # S_on = G.graph_data.S_on
-    # Sψ = (Wb * S_on * Wb')[1:ktb,1:ktb]
-    # Δorth = norm(Sψ - Diagonal([Sψ[1], fill(Sψ[2],3)...]))^2
-    
-    return Δop + cone_w * Δcone + gap_w * Δgap #+ orth_w * Δorth
+    return Δop + cone_w * Δcone
 end

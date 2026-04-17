@@ -27,7 +27,7 @@ println("=== Step 1: Generate training data ===")
 rcut  = 20.0u"Å"
 kgrid = [6, 6, 1]
 temperature = 1e-2
-width = 0.08   # half-width of the plateau
+width = 0.05   # half-width of the support
 filter = FermiFilter(width)
 cache_file = "training_graphene_data_cache.jld2"
 
@@ -47,7 +47,7 @@ else
             syslist, rcut, kgrid, filter;
             basis_name = "def2-SVP",
             Ecut=30,
-            cone_scale=5,
+            cone_scale=3,
             temperature
         );
 
@@ -64,9 +64,8 @@ println("  nbas = $(bs.nbas), natoms = $(bs.natoms)")
 println("\n=== Step 2: Train ===")
 
 NORB = 1        # number of orbitals for each atom
-filter_σ = 0.6  # smoothing parameter for Fermi filter
-cone_w = 1.0    # weight of the Dirac cone
-gap_w = 0.5     # weight of the gap
+filter_σ = 0.5  # smoothing parameter for Fermi filter
+cone_w = 2.0    # weight of the Dirac cone
 ps, st, model = multilevel_train_H(
     G_list,
     λ_ref_list,
@@ -75,10 +74,10 @@ ps, st, model = multilevel_train_H(
     kw_list,
     bs, NORB, rcut;
     filter = filter_list,
-    filter_σ, cone_w, gap_w,
+    filter_σ, cone_w, 
     model_type      = :acev_3c,
-    target_Dtot     = 6,
-    target_maxl     = 5,
+    target_Dtot     = 8,
+    target_maxl     = 6,
     target_ORD      = 3,
     H_iterations    = 100,
     verbose         = true,
@@ -117,7 +116,7 @@ for i in eachindex(G_list)
         kw_list[i],
         filter_list[i],
         model, ps, st;
-        filter_σ, cone_w, gap_w,
+        filter_σ, cone_w,
     )
     println("  Structure $i  RMSE_H = $(round(sqrt(err_H), digits=6))")
 end
@@ -127,8 +126,8 @@ end
 # ============================================================
 println("\n=== Step 4: Band structure ===")
 
-name_comp = "cone_gap"
-save_figure = false
+name_comp = "cone"
+save_figure = true
 compute_and_save_bandstructures(
     G_list[1], syslist[1], model, ps, st;
     kgrid      = [6, 6, 1],
@@ -146,7 +145,7 @@ plot_and_save_orbitals(
     orb_index = 1,
     xrange = (-5.5,5.5),
     yrange = (-8.5,2.5),
-    orb_name  = "",
+    orb_name  = L"p_z",
     name      = name_comp,
     save_figure
 )
