@@ -3,9 +3,8 @@ using StaticArrays
 using ChainRulesCore
 using Zygote
 using Optimisers: destructure
-using MatrixFuns
 
-export RMSE, RMSE_H
+export FermiFilter, RMSE, RMSE_H
 
 # ---------------------------------------------------------------------------
 # Eigenvalue RMSE
@@ -21,7 +20,8 @@ function RMSE(G, λ_ref, model, ps, st; keep_bands::Int = 4)
     end
 
     λ_pred_keep = getindex.(λ_pred, Ref(1:keep_bands))
-    sq_diff = sum(v -> sum(abs2, v), λ_pred_keep .- λ_ref)
+    λ_ref_keep = getindex.(λ_ref, Ref(1:keep_bands))
+    sq_diff = sum(v -> sum(abs2, v), λ_pred_keep .- λ_ref_keep)
     n_total = length(λ_pred) * keep_bands
     return sqrt(sq_diff / n_total)
 end
@@ -43,7 +43,8 @@ function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
         end
 
         λ_pred_keep = getindex.(λ_pred, Ref(1:keep_bands))
-        diff        = λ_pred_keep .- λ_ref_list[i]
+        λ_ref_keep = getindex.(λ_ref_list[i], Ref(1:keep_bands))
+        diff        = λ_pred_keep .- λ_ref_keep
         total_sq   += sum(v -> sum(abs2, v), diff)
         total_n    += length(diff) * keep_bands
     end
@@ -61,7 +62,9 @@ function RMSE_H(Glist::AbstractVector,
                 proj_list::AbstractVector,
                 kw_list::AbstractVector,
                 filter_list::AbstractVector,
-                model, ps, st)
+                model, ps, st; 
+                cone_w=1.0, gap_w=1.0, 
+                filter_σ=0.5)
 
     n = length(Glist)
     @assert length(λ_ref_list)  == n
@@ -78,23 +81,28 @@ function RMSE_H(Glist::AbstractVector,
                         proj_list[i],
                         kw_list[i],
                         filter_list[i],
-                        model, ps, st)
+                        model, ps, st; 
+                        cone_w, gap_w, 
+                        filter_σ)
     end
-    return total / n
+
+    return sqrt(total / n)
 end
 
 # ---------------------------------------------------------------------------
-# FermiFilter
+# FermiFilter: a soomthed step function with support near the Fermi level.
 # ---------------------------------------------------------------------------
 
 struct FermiFilter{T<:Real}
     μ::T       # Fermi level
     σ::T       # smoothing parameter
     width::T   # half-width of the plateau
+    β::T       # inverse temperatures
 end
-FermiFilter() = FermiFilter(0.0, 0.1, 0.2)
+FermiFilter(width::Real) = FermiFilter(0.0, 0.5, width, 10.0)
+set_new_filter(σ, f::FermiFilter) = FermiFilter(f.μ, σ, f.width, f.β)
 
-function eval_filter(x, f)
+function (f::FermiFilter)(x::Real)
     rise = 0.5 * (1 + erf((x - f.μ + f.width) / f.σ))
     fall = 0.5 * (1 - erf((x - f.μ - f.width) / f.σ))
     return rise + fall - 1
@@ -103,47 +111,62 @@ end
 # ---------------------------------------------------------------------------
 # Hamiltonian RMSE (single structure)
 # ---------------------------------------------------------------------------
-
-function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st)
+function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; 
+                cone_w=1.0, gap_w=1.0, filter_σ=0.5)
 
     result = model(G, ps, st)
     out    = result[1]
     Wb     = out.Wb
+    nk     = length(kweights)
 
-    filter_fn = let f = filter
-        x -> eval_filter(x, f)
-    end
+    filter = set_new_filter(filter_σ, filter)
 
-    Δop = sum(enumerate(kweights)) do (ik, ikw)
-        ikw = kweights[ik]
+    fλ_ref = [filter.(real.(λ)) for λ in λ_ref[1:nk]]
+    D_ref = Diagonal.(fλ_ref) 
+    norm2_ref = norm.(fλ_ref).^ 2
 
-        Jk  = proj[ik] * Wb'
-        ihS = ortho_lowdin_hS(Jk)
-        Jk  = Jk * ihS
+    Δop = 0.0
+    for (ik, ikw) in enumerate(kweights)
         λ_pred = out.λ[ik]
-        V      = out.Vlist[ik]
-        V_orth = ihS * V
-        fH_k_proj = Jk * (V_orth * Diagonal(filter_fn.(real.(λ_pred))) * V_orth') * Jk'
-        fH_k_ref  = mat_fun_eigen(filter_fn, λ_ref[ik], ψ_ref[ik])
+        Jk  = proj[ik] * Wb'
+        #iSk  = inv(Jk' * Jk)
+        iSk  = inv(out.Sout[ik])
 
-        ΔfH_k = fH_k_ref - fH_k_proj
-        ikw * norm(ΔfH_k)
+        D_pred = Diagonal(filter.(real.(λ_pred)))
+        ψ_pred = Jk * iSk * out.Vlist[ik]
+        S_pred = ψ_pred' * ψ_pred
+        S_ref_pred = ψ_ref[ik]' * ψ_pred
+
+        norm2_pred = real(tr(D_pred * S_pred * D_pred * S_pred))
+        cross_term = real(tr(D_ref[ik] * S_ref_pred * D_pred * S_ref_pred'))
+
+        Δop += kweights[ik] * (norm2_ref[ik] + norm2_pred - 2cross_term)
     end
 
-    return Δop
-end
+    # train the Dirac cone
+    Δcone = 0.0
+    if cone_w > 0
+        kpw = findlast(x->x<=0, λ_ref[1] .- filter.μ)
+        ktb = div(size(Wb,1),2)
+        nbands = min(3, ktb)
+        λ_pred_cone = getindex.(out.λ[nk+1:end], Ref(ktb-nbands+1:ktb+nbands))
+        λ_ref_cone = getindex.(λ_ref[nk+1:end], Ref(kpw-nbands+1:kpw+nbands))
+        Δcone = sum(v -> sum(abs2, v), λ_pred_cone .- λ_ref_cone)
+        nsym = length(λ_ref) - nk
+        Δcone /= 2nbands * nsym
+    end
 
-function mat_fun_eigen(f, λ, ψ)
-    fλ = f.(real.(λ))
-    return ψ * Diagonal(fλ) * ψ'
-end
+    Δgap = 0.0
+    if gap_w > 0
+        gap_ref = [x[nbands+1]-x[nbands] for x in λ_ref_cone]
+        gap_pred = [x[nbands+1]-x[nbands] for x in λ_pred_cone]
+        Δgap = sum(abs2, gap_ref - gap_pred) / nsym
+    end
 
-# ---------------------------------------------------------------------------
-# Linear algebra helpers
-# ---------------------------------------------------------------------------
-
-function ortho_lowdin_hS(φk::AbstractArray{T}) where {T}
-    evals, evecs = eigen(Hermitian(φk' * φk))
-    @assert minimum(abs, evals) > eps(real(T)) * maximum(abs, evals)
-    return evecs * Diagonal(evals .^ (-0.5)) * evecs'
+    # train the orthonormality for compressed orbitals
+    # S_on = G.graph_data.S_on
+    # Sψ = (Wb * S_on * Wb')[1:ktb,1:ktb]
+    # Δorth = norm(Sψ - Diagonal([Sψ[1], fill(Sψ[2],3)...]))^2
+    
+    return Δop + cone_w * Δcone + gap_w * Δgap #+ orth_w * Δorth
 end

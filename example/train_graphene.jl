@@ -11,27 +11,29 @@ using LinearAlgebra
 using Random
 using Lux
 using Zygote
-using MatrixFuns
 using Optimisers: destructure
 using JLD2
 
 include("data/generate_data.jl")
-include("data/graphene_ham.jl")
+include("data/graphene_data.jl")
+include("data/plot.jl")
+
 
 # ============================================================
 # 1. Generate training data
 # ============================================================
 println("=== Step 1: Generate training data ===")
 
-rcut  = 5.0u"Å"
+rcut  = 20.0u"Å"
 kgrid = [6, 6, 1]
-filter = FermiFilter()
-cache_file = "training_data_cache.jld2"
+temperature = 1e-2
+width = 0.08   # half-width of the plateau
+filter = FermiFilter(width)
+cache_file = "training_graphene_data_cache.jld2"
 
 if isfile(cache_file)
     println("  Found cache, loading from $cache_file ...")
     @load cache_file bs λ_ref_list ψ_ref_list filter_list proj_list kw_list G_list syslist
-    filter_list = [filter.filter_new for filter in filter_list]
     println("  Loaded $(length(syslist)) structures from cache.")
 else
     println("  No cache found, generating data ...")
@@ -44,7 +46,10 @@ else
         build_ref_and_graph_lists_sph_graphene(
             syslist, rcut, kgrid, filter;
             basis_name = "def2-SVP",
-        )
+            Ecut=30,
+            cone_scale=5,
+            temperature
+        );
 
     println("  Saving cache to $cache_file ...")
     @save cache_file bs λ_ref_list ψ_ref_list filter_list proj_list kw_list G_list syslist
@@ -58,25 +63,43 @@ println("  nbas = $(bs.nbas), natoms = $(bs.natoms)")
 # ============================================================
 println("\n=== Step 2: Train ===")
 
-NORB = 4
-
+NORB = 1        # number of orbitals for each atom
+filter_σ = 0.6  # smoothing parameter for Fermi filter
+cone_w = 1.0    # weight of the Dirac cone
+gap_w = 0.5     # weight of the gap
 ps, st, model = multilevel_train_H(
     G_list,
     λ_ref_list,
     ψ_ref_list,
     proj_list,
     kw_list,
-    bs,
-    NORB,
-    rcut;
+    bs, NORB, rcut;
     filter = filter_list,
+    filter_σ, cone_w, gap_w,
     model_type      = :acev_3c,
     target_Dtot     = 6,
+    target_maxl     = 5,
+    target_ORD      = 3,
+    H_iterations    = 100,
+    verbose         = true,
+);
+
+#= 
+# ----------------------------------------------------------------
+# train the band structures
+# ----------------------------------------------------------------
+ps, st, model = multilevel_train(
+    G_list[1], λ_ref_list[1], bs, NORB, rcut;
+    model_type      = :acev_3c,
+    target_Dtot     = 14,
     target_maxl     = 4,
-    target_ORD      = 2,
-    H_iterations    = 10,
+    target_ORD      = 3,
+    keep_bands      = 4,
+    adam_iterations = 200,
+    base_iterations = 500,
     verbose         = true,
 )
+=#
 
 println("\n  Training done.")
 
@@ -93,57 +116,37 @@ for i in eachindex(G_list)
         proj_list[i],
         kw_list[i],
         filter_list[i],
-        model, ps, st,
+        model, ps, st;
+        filter_σ, cone_w, gap_w,
     )
-    println("  Structure $i  RMSE_H = $(round(err_H, digits=6))")
+    println("  Structure $i  RMSE_H = $(round(sqrt(err_H), digits=6))")
 end
 
 # ============================================================
-# 4. Band structure comparison
+# 4. Band structure comparison and orbital plot
 # ============================================================
 println("\n=== Step 4: Band structure ===")
 
+name_comp = "cone_gap"
+save_figure = false
 compute_and_save_bandstructures(
     G_list[1], syslist[1], model, ps, st;
     kgrid      = [6, 6, 1],
-    keep_bands = 4,
-    name       = "graphene_bands_rmseH.png",
+    keep_bands = 8,
+    xc_type    = "pbe",
+    psp_type   = "gth",
+    sys_type   = "graphene",
+    name       = name_comp,
+    save_figure
 )
-println("  Saved graphene_bands_rmseH.png")
 
-# ============================================================
-# 5. Predict on new structure
-# ============================================================
-println("\n=== Step 5: Predict on new structure ===")
-
-sys_pred = perturb(build_graphene(); ϵ = 0.02)
-
-bs_pred, λ_pred_ref_list, ψ_pred_ref_list, filter_pred_list, proj_pred_list, kw_pred_list, G_pred_list =
-    build_ref_and_graph_lists_sph_graphene(
-        [sys_pred], rcut, kgrid, filter;
-        basis_name = "def2-SVP",
-    )
-
-st_pred = update_basisset(st, bs_pred)
-
-out, _ = model(G_pred_list[1], ps, st_pred)
-println("  Predicted $(length(out.λ)) k-points, $(length(out.λ[1])) bands each.")
-
-err_H_pred = RMSE_H(
-    G_pred_list[1],
-    λ_pred_ref_list[1],
-    ψ_pred_ref_list[1],
-    proj_pred_list[1],
-    kw_pred_list[1],
-    filter_pred_list[1],
-    model, ps, st_pred,
+plot_and_save_orbitals(
+    G_list[1], model, ps, st, bs;
+    iatom     = 1,
+    orb_index = 1,
+    xrange = (-5.5,5.5),
+    yrange = (-8.5,2.5),
+    orb_name  = "",
+    name      = name_comp,
+    save_figure
 )
-println("  New structure RMSE_H = $(round(err_H_pred, digits=6))")
-
-compute_and_save_bandstructures(
-    G_pred_list[1], sys_pred, model, ps, st_pred;
-    kgrid      = [6, 6, 1],
-    keep_bands = 4,
-    name       = "graphene_pred_rmseH.png",
-)
-println("  Saved graphene_pred_rmseH.png")

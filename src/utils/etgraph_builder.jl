@@ -189,13 +189,6 @@ function nlist2graph(bs::BasisSet, nlist, sys, klist)
     return G
 end
 
-function physical_k(sys, k_reduced::AbstractVector{<:Real})
-    @assert length(k_reduced) == 3
-    lattice = get_lattice(sys)
-    G_basis = reciprocal_lattice(lattice)
-    return G_basis * SVector{3,Float64}(k_reduced)
-end
-
 function physical_k(sys, k_reduced::SVector{3,<:Real})
     lattice = get_lattice(sys)
     G_basis = reciprocal_lattice(lattice)

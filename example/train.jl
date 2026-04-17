@@ -15,16 +15,16 @@ using Optimisers: destructure
 using JLD2
 
 include("data/generate_data.jl")
-include("data/plot_bands.jl")
+include("data/plot.jl")
 
 # ============================================================
 # 1. Generate training data
 # ============================================================
 println("=== Step 1: Generate training data ===")
 
-rcut  = 12.5u"Å"
-kgrid = [6, 7, 8]
-cache_file = "training_data_cache.jld2"
+rcut  = 5.0u"Å"
+kgrid = [6, 6, 6]
+cache_file = "training_Si_data_cache.jld2"
 
 if isfile(cache_file)
     println("  Found cache, loading from $cache_file ...")
@@ -67,8 +67,8 @@ ps, st, model = multilevel_train(
     target_maxl     = 4,
     target_ORD      = 3,
     keep_bands      = 4,
-    adam_iterations = 0,
-    base_iterations = 10_000,
+    adam_iterations = 200,
+    base_iterations = 200,
     verbose         = true,
 )
 

@@ -8,26 +8,7 @@ import GaussianBasis: Acsint
 using Unitful: Å
 using AtomsBuilder: rattle!
 using LinearAlgebra
-using SpecialFunctions
-
-# ---------------------------------------------------------------------------
-# Fermi region filter: a soomthed step function with support near the Fermi level.
-# ---------------------------------------------------------------------------
-struct FermiFilter{T<:Real}
-    μ::T       # Fermi level
-    σ::T       # smoothing parameter
-    width::T   # half-width of the plateau
-end
-FermiFilter() = FermiFilter(0.0, 0.1, 0.2)
-
-function eval_filter(x, f::FermiFilter)
-    rise = 0.5 * (1 + erf((x - f.μ + f.width) / f.σ))
-    fall = 0.5 * (1 - erf((x - f.μ - f.width) / f.σ))
-
-    return rise + fall - 1
-end
-
-(f::FermiFilter)(x::Real) = eval_filter(x, f)
+using RealMLTB
 
 # ---------------------------------------------------------------------------
 # Build the matrices of projectors onto the spherical atomic orbitals.
@@ -63,7 +44,7 @@ end
 # Build Fourier transform factors of a spherical basis function centered at 0.
 # ---------------------------------------------------------------------------
 function build_sph_form_factors(B::SphericalShell, 
-                                G_plus_ks::AbstractVector{<:AbstractVector{Vec3{T}}}) where {T}
+                                G_plus_ks::AbstractVector)
     fun(q) = eval_sph_fun_fourier(B, q)
     DFTK.build_form_factors(fun, B.l, G_plus_ks)
 end
@@ -85,39 +66,61 @@ end
 # ---------------------------------------------------------------------------
 # Run DFT on sys and return k-points and scfres
 # ---------------------------------------------------------------------------
-function generate_data_graphene(sys, kgrid, filter::FermiFilter, bs_ao::BasisSet; 
-                                Ecut=15, nbands_plus=10)
+function generate_data_graphene(sys, kgrid, filter::FermiFilter, 
+                                bs_ao::BasisSet; Ecut=15, 
+                                nbands_plus=10, temperature=1e-3, 
+                                kline_density=10u"bohr",
+                                cone_scale=5)
     lattice = RealMLTB.get_lattice(sys)
     positions = RealMLTB.fractional_coordinates(sys)
     C = ElementPsp(:C, PseudoFamily("cp2k.nc.sr.pbe.v0_1.semicore.gth"))
     atoms = fill(C, length(positions))
 
     model = model_DFT(lattice, atoms, positions;
-                      functionals=PBE(), temperature=1e-3)
+                      functionals=PBE(), temperature)
     basis = PlaneWaveBasis(model; Ecut, kgrid)
     scfres = self_consistent_field(basis; tol=1e-8, callback=(_) -> nothing)
 
     εF = scfres.εF
-    filter_new = FermiFilter(εF, filter.σ, filter.width)
-    filter_fun(x) = eval_filter(x, filter_new)
+    filter_new = FermiFilter(εF, filter.σ, filter.width, inv(temperature))
     if minimum(x->x[end], scfres.eigenvalues) >= εF + filter.width
         nbands_plus = 0
     end
     nbands = AdaptiveBands(basis.model).n_bands_compute + nbands_plus
-    ham = Hamiltonian(basis; ρ=scfres.ρ)
-    eigres = diagonalize_all_kblocks(lobpcg_hyper, ham, nbands; ψguess=nothing)
-    λs = [λ[1:nbands] for λ in eigres.λ]
-    ψs = [X[:,1:nbands] for X in eigres.X]
+
+    λs, ψs = extract_eigen(scfres.basis, nbands; ρ=scfres.ρ)
 
     k_list = [SVector{3,Float64}(kp.coordinate) for kp in basis.kpoints]
     proj = build_pw_to_ao_projectors(basis, bs_ao)
 
-    return k_list, basis.kweights, proj, filter_fun, λs, ψs
+    # Extract information near the Dirac (K) point
+    kpath = irrfbz_path(model; dim=2, space_group_number=13)
+    K = SVector{3,Float64}(kpath.points[:K]..., 0.0)
+    kinter = DFTK.Brillouin.interpolate(kpath, density=austrip(kline_density))
+    kcoords = [SVector{3,Float64}(x...,0.0) for x in kinter.kpaths[1]]
+    dist = norm(basis.model.recip_lattice[:,1]) / cone_scale
+    Kind = findall(x -> norm(basis.model.recip_lattice * (K-x)) < dist, kcoords)
+    bs_K = PlaneWaveBasis(basis, ExplicitKpoints(vcat(kcoords[Kind],[-K])))
+    λs_K, ψs_K = extract_eigen(bs_K, nbands; ρ=scfres.ρ)
+
+    append!(k_list, kcoords[Kind], [-K])
+    append!(λs, λs_K)
+    append!(ψs, ψs_K)    
+ 
+    return k_list, basis.kweights, proj, filter_new, λs, ψs
+end
+
+function extract_eigen(basis, nbands::Int; kws...)
+    ham = Hamiltonian(basis; kws...)
+    eigres = diagonalize_all_kblocks(lobpcg_hyper, ham, nbands; ψguess=nothing)
+    λs = [λ[1:nbands] for λ in eigres.λ]
+    ψs = [X[:,1:nbands] for X in eigres.X]
+
+    return λs, ψs
 end
 
 function build_graphene()
     L = 20  # height of the simulation box
-    temperature = 1e-3
 
     # Define the geometry and pseudopotential
     a = 4.66  # lattice constant
@@ -131,7 +134,7 @@ function build_graphene()
     C = ElementPsp(:C, PseudoFamily("cp2k.nc.sr.pbe.v0_1.semicore.gth"))
     atoms = [C, C]
 
-    model = model_DFT(lattice, atoms, positions; functionals=PBE(), temperature)
+    model = model_DFT(lattice, atoms, positions; functionals=PBE())
     sys_bohr = DFTK.periodic_system(model)
 
     cell_ang = [ustrip.(u"Å", cv) * u"Å" for cv in sys_bohr.cell.cell_vectors]
