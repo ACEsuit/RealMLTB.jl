@@ -156,6 +156,7 @@ function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st;
         Δcone /= 2nbands * nsym
     end
 
+    # train the band gap
     Δgap = 0.0
     if gap_w > 0
         gap_ref = [x[nbands+1]-x[nbands] for x in λ_ref_cone]

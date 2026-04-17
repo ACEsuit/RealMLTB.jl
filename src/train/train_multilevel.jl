@@ -209,7 +209,8 @@ function _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
 end
 
 function _prepare_level_parameters(i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
-    embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter)
+    embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter,
+    cone_w::Float64, gap_w::Float64, filter_σ::Float64)
     if i == 1 || isnothing(embed_func)
         verbose && println("    Init: random")
         return ps_init, st_init
@@ -220,7 +221,7 @@ function _prepare_level_parameters(i, verbose, prev_model, prev_ps, current_mode
 
     if verbose
         if _phase3_enabled(ψ_ref, proj, kweights, filter)
-            err0 = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, current_model, ps_warm, st_init; )
+            err0 = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, current_model, ps_warm, st_init; cone_w, gap_w, filter_σ)
             println("    RMSE_H after warm-start: $err0")
         else
             err0 = RMSE(G, λ_ref, current_model, ps_warm, st_init; keep_bands = keep_bands)
@@ -326,6 +327,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
         current_ps, current_st = _prepare_level_parameters(
             i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
             embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter,
+            1.0, 1.0, 1.0
         )
 
         verbose && println("    Training: $base_iterations BFGS iterations, $adam_iterations Adam steps")
@@ -407,6 +409,7 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
         current_ps, current_st = _prepare_level_parameters(
             i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
             embed_func, G, λ_ref, 1, ψ_ref, proj, kweights, filter,
+            cone_w, gap_w, filter_σ
         )
 
         verbose && println("    Training: $H_iterations BFGS steps on RMSE_H")
