@@ -224,3 +224,327 @@ end
 function reciprocal_lattice(lattice)
     return 2π * SMatrix{3,3}(inv(lattice)')
 end
+
+
+using CUDA
+using ChainRulesCore
+using ChainRulesCore: NoTangent, unthunk
+
+# ---------------------------------------------------------------------------
+# Sparse3CGPU
+#
+# Stores a sparse 3-center tensor V[a,b,c] as separated GPU arrays:
+#   ia[n], ib[n], ic[n], vals[n]
+# so that
+#   V_pair[a,b] += vals[n] * Wv[c]
+# can be evaluated by a CUDA kernel.
+# ---------------------------------------------------------------------------
+struct Sparse3CGPU{TI, TV}
+    ia::TI
+    ib::TI
+    ic::TI
+    vals::TV
+end
+
+function _split_sparse3c_indices_kernel!(ia, ib, ic, idxs, nnz::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if q <= nnz
+        t = idxs[q]
+        ia[q] = Int32(t[1])
+        ib[q] = Int32(t[2])
+        ic[q] = Int32(t[3])
+    end
+
+    return nothing
+end
+
+"""
+    sparse3c_to_gpu(V_pair_raw; T=Float32)
+
+Convert a sparse 3-center tensor `(indices, vals)` to `Sparse3CGPU`.
+
+Works for both:
+  - CPU tuple: `(Vector{NTuple{3,Int}}, Vector{Float64})`
+  - GPU tuple: `(CuArray{NTuple{3,Int},1}, CuArray{Float32,1})`
+
+Use this function instead of calling `Sparse3CGPU(V_pair_raw)` directly.
+"""
+function sparse3c_to_gpu(V_pair_raw::Tuple; T = Float32)
+    idxs, vals = V_pair_raw
+
+    if idxs isa CUDA.CuArray
+        return sparse3c_to_gpu_from_gpu_tuple(V_pair_raw; T = T)
+    else
+        return sparse3c_to_gpu_from_cpu_tuple(V_pair_raw; T = T)
+    end
+end
+
+function sparse3c_to_gpu_from_cpu_tuple(V_pair_raw::Tuple; T = Float32)
+    idxs, vals = V_pair_raw
+    nnz = length(idxs)
+
+    ia = Vector{Int32}(undef, nnz)
+    ib = Vector{Int32}(undef, nnz)
+    ic = Vector{Int32}(undef, nnz)
+
+    @inbounds for n in 1:nnz
+        a, b, c = idxs[n]
+        ia[n] = Int32(a)
+        ib[n] = Int32(b)
+        ic[n] = Int32(c)
+    end
+
+    return Sparse3CGPU(
+        CUDA.cu(ia),
+        CUDA.cu(ib),
+        CUDA.cu(ic),
+        CUDA.cu(T.(vals)),
+    )
+end
+
+function sparse3c_to_gpu_from_gpu_tuple(V_pair_raw::Tuple; T = Float32)
+    idxs, vals = V_pair_raw
+
+    @assert idxs isa CUDA.CuArray "idxs must be a CuArray"
+    @assert vals isa CUDA.CuArray "vals must be a CuArray"
+    @assert ndims(idxs) == 1 "idxs must be a GPU vector"
+    @assert ndims(vals) == 1 "vals must be a GPU vector"
+
+    nnz = length(idxs)
+
+    ia = CUDA.zeros(Int32, nnz)
+    ib = CUDA.zeros(Int32, nnz)
+    ic = CUDA.zeros(Int32, nnz)
+
+    threads = 256
+    blocks = cld(nnz, threads)
+
+    @cuda threads=threads blocks=blocks _split_sparse3c_indices_kernel!(
+        ia, ib, ic, idxs, nnz
+    )
+
+    vals_gpu = eltype(vals) === T ? vals : T.(vals)
+
+    return Sparse3CGPU(ia, ib, ic, vals_gpu)
+end
+
+# ---------------------------------------------------------------------------
+# ThreeCenterGPUCache
+#
+# Build this from CPU G once, and keep using it in the GPU three-center layer.
+# G_gpu = dev(ET.float32(G)) should still be used for ACE only.
+# ---------------------------------------------------------------------------
+struct ThreeCenterGPUCache{TI, TR, TM, TS}
+    ii::TI                  # CPU Vector{Int}; small edge metadata
+    jj::TI                  # CPU Vector{Int}; small edge metadata
+    Rcell::TR               # CuArray{T,2}, 3 × nedges
+    klist::TR               # CuArray{T,2}, 3 × nk
+    nat::Int
+    NORB::Int
+    T_on::TM                # CuMatrix
+    V_on::TS                # Sparse3CGPU
+    S_on::TM                # CuMatrix
+    T_pair::Vector{TM}      # per-edge CuMatrix
+    V_pair::Vector{TS}      # per-edge Sparse3CGPU
+    S_pair::Vector{TM}      # per-edge CuMatrix
+end
+
+# Local safe accessor, avoids depending on _get_ii_jj from another file.
+@inline function _gpu_get_ii_jj(G)
+    fn = fieldnames(typeof(G))
+    if :ii ∈ fn && :jj ∈ fn
+        return G.ii, G.jj
+    elseif :i ∈ fn && :j ∈ fn
+        return G.i, G.j
+    else
+        error("Cannot determine ii/jj from ETGraph fieldnames: $(fn)")
+    end
+end
+
+function _gpu_hcat_svectors(xs)
+    isempty(xs) && return zeros(Float64, 3, 0)
+    return reduce(hcat, xs)
+end
+
+"""
+    make_3center_gpu_cache(G, NORB; T=Float32)
+
+Build a GPU cache for the three-center part from the original CPU graph `G`.
+
+Do NOT pass `G_gpu = dev(ET.float32(G))` here.  Pass the original CPU `G`.
+"""
+function make_3center_gpu_cache(G, NORB::Int; T = Float32)
+    ii, jj = _gpu_get_ii_jj(G)
+
+    nat = length(G.first) - 1
+    edge_data = G.edge_data
+    integral_table = G.graph_data.integral_table
+
+    # Keep these on CPU for simple dispatch/loop control. They are metadata.
+    ii_cpu = Int.(collect(ii))
+    jj_cpu = Int.(collect(jj))
+
+    Rcell_cpu = _gpu_hcat_svectors([ed.R_cell for ed in edge_data])
+    klist_cpu = _gpu_hcat_svectors(G.graph_data.klist)
+
+    Rcell_gpu = CUDA.cu(T.(Rcell_cpu))
+    klist_gpu = CUDA.cu(T.(klist_cpu))
+
+    T_on_gpu = CUDA.cu(T.(G.graph_data.T_on))
+    S_on_gpu = CUDA.cu(T.(G.graph_data.S_on))
+    V_on_gpu = sparse3c_to_gpu(G.graph_data.V_on; T = T)
+
+    T_pair_gpu = Vector{typeof(T_on_gpu)}(undef, length(edge_data))
+    S_pair_gpu = Vector{typeof(S_on_gpu)}(undef, length(edge_data))
+    V_pair_gpu = Vector{typeof(V_on_gpu)}(undef, length(edge_data))
+
+    for e in eachindex(edge_data)
+        ed = edge_data[e]
+        tbl = integral_table[ed.integral_idx]
+
+        T_pair_gpu[e] = CUDA.cu(T.(tbl.T_pair))
+        S_pair_gpu[e] = CUDA.cu(T.(tbl.S_pair))
+        V_pair_gpu[e] = sparse3c_to_gpu(tbl.V_pair; T = T)
+    end
+
+    return ThreeCenterGPUCache(
+        ii_cpu,
+        jj_cpu,
+        Rcell_gpu,
+        klist_gpu,
+        nat,
+        NORB,
+        T_on_gpu,
+        V_on_gpu,
+        S_on_gpu,
+        T_pair_gpu,
+        V_pair_gpu,
+        S_pair_gpu,
+    )
+end
+
+# ---------------------------------------------------------------------------
+# GPU sparse contraction: V_pair[a,b] += vals[n] * Wv[c]
+# ---------------------------------------------------------------------------
+function _sparse_contract_gpu_kernel!(V_pair, ia, ib, ic, vals, Wv, nnz::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if q <= nnz
+        a = Int(ia[q])
+        b = Int(ib[q])
+        c = Int(ic[q])
+
+        CUDA.@atomic V_pair[a, b] += vals[q] * Wv[c]
+    end
+
+    return nothing
+end
+
+function _sparse_contract_gpu(Vraw::Sparse3CGPU, Wv::CUDA.CuArray{<:Real,1}, nbas::Int)
+    V_pair = CUDA.zeros(eltype(Wv), nbas, nbas)
+
+    nnz = length(Vraw.vals)
+    threads = 256
+    blocks = cld(nnz, threads)
+
+    @cuda threads=threads blocks=blocks _sparse_contract_gpu_kernel!(
+        V_pair,
+        Vraw.ia,
+        Vraw.ib,
+        Vraw.ic,
+        Vraw.vals,
+        Wv,
+        nnz,
+    )
+
+    return V_pair
+end
+
+function _sparse_contract_pullback_gpu_kernel!(Wvbar, ia, ib, ic, vals, ΔA, nnz::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if q <= nnz
+        a = Int(ia[q])
+        b = Int(ib[q])
+        c = Int(ic[q])
+
+        CUDA.@atomic Wvbar[c] += vals[q] * ΔA[a, b]
+    end
+
+    return nothing
+end
+
+function _sparse_contract_pullback_gpu(
+    Vraw::Sparse3CGPU,
+    ΔA::CUDA.CuArray{<:Real,2},
+    nwv::Int,
+)
+    Wvbar = CUDA.zeros(eltype(ΔA), nwv)
+
+    nnz = length(Vraw.vals)
+    threads = 256
+    blocks = cld(nnz, threads)
+
+    @cuda threads=threads blocks=blocks _sparse_contract_pullback_gpu_kernel!(
+        Wvbar,
+        Vraw.ia,
+        Vraw.ib,
+        Vraw.ic,
+        Vraw.vals,
+        ΔA,
+        nnz,
+    )
+
+    return Wvbar
+end
+
+@inline function _named_field(field::Symbol, value)
+    return NamedTuple{(field,)}((value,))
+end
+
+function _named_field(name::Symbol, value)
+    return NamedTuple{(name,)}((value,))
+end
+
+function _replace_graph_data_preserve_storage(G_gpu, new_graph_data)
+    fns = fieldnames(typeof(G_gpu))
+
+    @assert :graph_data in fns
+    @assert :first in fns
+
+    vals = ntuple(length(fns)) do k
+        f = fns[k]
+        if f === :graph_data
+            new_graph_data
+        else
+            getfield(G_gpu, f)
+        end
+    end
+
+    # Bypass ETGraph(ii,jj; ...) constructor.
+    # This preserves first/ii/jj/edge_data exactly as in G_gpu.
+    return (Base.typename(typeof(G_gpu)).wrapper)(vals...)
+end
+
+function attach_3center_gpu_cache(G_gpu, cache; field::Symbol = :threecenter_cache)
+    new_graph_data = (
+    klist = G_gpu.graph_data.klist,
+    threecenter_cache = cache,)
+
+    G1 = _replace_graph_data_preserve_storage(G_gpu, new_graph_data)
+
+    @assert getfield(G1, :first) === getfield(G_gpu, :first)
+    @assert typeof(getfield(G1, :first)) == typeof(getfield(G_gpu, :first))
+
+    return G1
+end
+
+function with_3center_gpu_cache(G_cpu, G_gpu, NORB; T = Float32, field::Symbol = :threecenter_cache)
+    cache = make_3center_gpu_cache(G_cpu, NORB; T = T)
+    return attach_3center_gpu_cache(G_gpu, cache; field = field)
+end
+
+@inline function get_3center_gpu_cache(G; field::Symbol = :threecenter_cache)
+    return getproperty(G.graph_data, field)
+end

@@ -153,3 +153,399 @@ function ChainRulesCore.rrule(::typeof(_assemble_dense), G,
 
     return (Hout, Sout), pullback
 end
+
+
+using CUDA
+using LinearAlgebra
+
+# ---------------------------------------------------------------------------
+# GPU assembly kernels
+#
+# Input:
+#   vH, vS :: CuArray{T,3}, size = (NORB, NORB, nat + nedges)
+#
+# Layout:
+#   vH[:,:,1:nat]       = onsite blocks
+#   vH[:,:,nat+1:end]   = offsite edge blocks
+#
+# Output:
+#   Hout, Sout :: CuArray{Complex{T},3}, size = (dim, dim, nk)
+# ---------------------------------------------------------------------------
+
+function _assemble_onsite_kernel!(
+    Hout,
+    Sout,
+    vH,
+    vS,
+    nat::Int,
+    NORB::Int,
+    nk::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = nat * NORB * NORB * nk
+
+    if q <= N
+        t = q - 1
+
+        ik = (t % nk) + 1
+        t ÷= nk
+
+        b = (t % NORB) + 1
+        t ÷= NORB
+
+        a = (t % NORB) + 1
+        i = (t ÷ NORB) + 1
+
+        row = (i - 1) * NORB + a
+        col = (i - 1) * NORB + b
+
+        Hout[row, col, ik] += complex(vH[a, b, i])
+        Sout[row, col, ik] += complex(vS[a, b, i])
+    end
+
+    return nothing
+end
+
+function _assemble_offsite_edge_kernel!(
+    Hout,
+    Sout,
+    vH,
+    vS,
+    klist,
+    Rcell,
+    e::Int,
+    i::Int,
+    j::Int,
+    nat::Int,
+    NORB::Int,
+    nk::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * NORB * nk
+
+    if q <= N
+        t = q - 1
+
+        ik = (t % nk) + 1
+        t ÷= nk
+
+        b = (t % NORB) + 1
+        a = (t ÷ NORB) + 1
+
+        row = (i - 1) * NORB + a
+        col = (j - 1) * NORB + b
+
+        idx = nat + e
+
+        θ =
+            klist[1, ik] * Rcell[1, e] +
+            klist[2, ik] * Rcell[2, e] +
+            klist[3, ik] * Rcell[3, e]
+
+        phase = complex(cos(θ), sin(θ))
+
+        Hout[row, col, ik] += complex(vH[a, b, idx]) * phase
+        Sout[row, col, ik] += complex(vS[a, b, idx]) * phase
+    end
+
+    return nothing
+end
+
+function _hermitize_dense_kernel!(Hout, Sout, dim::Int, nk::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = dim * dim * nk
+
+    if q <= N
+        t = q - 1
+
+        ik = (t % nk) + 1
+        t ÷= nk
+
+        col = (t % dim) + 1
+        row = (t ÷ dim) + 1
+
+        if row <= col
+            h = (Hout[row, col, ik] + conj(Hout[col, row, ik])) / 2
+            s = (Sout[row, col, ik] + conj(Sout[col, row, ik])) / 2
+
+            Hout[row, col, ik] = h
+            Sout[row, col, ik] = s
+
+            if row != col
+                Hout[col, row, ik] = conj(h)
+                Sout[col, row, ik] = conj(s)
+            end
+        end
+    end
+
+    return nothing
+end
+
+function _assemble_dense(
+    G,
+    vH::CUDA.CuArray{TH,3},
+    vS::CUDA.CuArray{TH,3},
+    klist_unused,
+) where {TH <: Real}
+
+    cache = G.graph_data.threecenter_cache
+
+    ii = cache.ii
+    jj = cache.jj
+
+    Rcell = cache.Rcell      # 3 × nedges, CuArray
+    klist = cache.klist      # 3 × nk, CuArray
+
+    nat = cache.nat
+    NORB = cache.NORB
+    nedges = length(ii)
+    nk = size(klist, 2)
+
+    dim = nat * NORB
+    TC = Complex{TH}
+
+    Hout = CUDA.zeros(TC, dim, dim, nk)
+    Sout = CUDA.zeros(TC, dim, dim, nk)
+
+    threads = 256
+
+    # onsite blocks
+    N_on = nat * NORB * NORB * nk
+    blocks_on = cld(N_on, threads)
+
+    @cuda threads=threads blocks=blocks_on _assemble_onsite_kernel!(
+        Hout,
+        Sout,
+        vH,
+        vS,
+        nat,
+        NORB,
+        nk,
+    )
+
+    # offsite edge blocks
+    N_edge = NORB * NORB * nk
+    blocks_edge = cld(N_edge, threads)
+
+    for e in 1:nedges
+        i = ii[e]
+        j = jj[e]
+
+        @cuda threads=threads blocks=blocks_edge _assemble_offsite_edge_kernel!(
+            Hout,
+            Sout,
+            vH,
+            vS,
+            klist,
+            Rcell,
+            e,
+            i,
+            j,
+            nat,
+            NORB,
+            nk,
+        )
+    end
+
+    # Hermitize
+    N_herm = dim * dim * nk
+    blocks_herm = cld(N_herm, threads)
+
+    @cuda threads=threads blocks=blocks_herm _hermitize_dense_kernel!(
+        Hout,
+        Sout,
+        dim,
+        nk,
+    )
+
+    return Hout, Sout
+end
+
+using CUDA
+using ChainRulesCore
+using ChainRulesCore: NoTangent, unthunk, ZeroTangent, NoTangent
+
+@inline function _zero_if_not_array(x, like)
+    x isa ZeroTangent && return CUDA.zeros(eltype(like), size(like))
+    x isa NoTangent && return CUDA.zeros(eltype(like), size(like))
+    return x
+end
+
+function _assemble_dense_pullback_onsite_kernel!(
+    vHbar,
+    vSbar,
+    ΔHsym,
+    ΔSsym,
+    nat::Int,
+    NORB::Int,
+    nk::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = nat * NORB * NORB
+
+    if q <= N
+        t = q - 1
+
+        b = (t % NORB) + 1
+        t ÷= NORB
+
+        a = (t % NORB) + 1
+        i = (t ÷ NORB) + 1
+
+        row = (i - 1) * NORB + a
+        col = (i - 1) * NORB + b
+
+        accH = zero(eltype(vHbar))
+        accS = zero(eltype(vSbar))
+
+        for ik in 1:nk
+            accH += ΔHsym[row, col, ik]
+            accS += ΔSsym[row, col, ik]
+        end
+
+        vHbar[a, b, i] = accH
+        vSbar[a, b, i] = accS
+    end
+
+    return nothing
+end
+
+function _assemble_dense_pullback_offsite_kernel!(
+    vHbar,
+    vSbar,
+    ΔHsym,
+    ΔSsym,
+    klist,
+    Rcell,
+    e::Int,
+    i::Int,
+    j::Int,
+    nat::Int,
+    NORB::Int,
+    nk::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * NORB
+
+    if q <= N
+        t = q - 1
+
+        b = (t % NORB) + 1
+        a = (t ÷ NORB) + 1
+
+        row = (i - 1) * NORB + a
+        col = (j - 1) * NORB + b
+
+        idx = nat + e
+
+        accH = zero(eltype(vHbar))
+        accS = zero(eltype(vSbar))
+
+        for ik in 1:nk
+            θ =
+                klist[1, ik] * Rcell[1, e] +
+                klist[2, ik] * Rcell[2, e] +
+                klist[3, ik] * Rcell[3, e]
+
+            cphase = complex(cos(θ), -sin(θ))
+
+            accH += cphase * ΔHsym[row, col, ik]
+            accS += cphase * ΔSsym[row, col, ik]
+        end
+
+        vHbar[a, b, idx] = accH
+        vSbar[a, b, idx] = accS
+    end
+
+    return nothing
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(_assemble_dense),
+    G,
+    vH::CUDA.CuArray{TH,3},
+    vS::CUDA.CuArray{TH,3},
+    klist_unused,
+) where {TH <: Real}
+
+    Hout, Sout = _assemble_dense(G, vH, vS, klist_unused)
+
+    cache = G.graph_data.threecenter_cache
+
+    ii = cache.ii
+    jj = cache.jj
+    Rcell = cache.Rcell
+    klist = cache.klist
+
+    nat = cache.nat
+    NORB = cache.NORB
+    nedges = length(ii)
+    nk = size(klist, 2)
+
+    function pullback_assemble_dense_gpu(ΔΩ)
+        ΔHout_raw = unthunk(ΔΩ[1])
+        ΔSout_raw = unthunk(ΔΩ[2])
+
+        ΔHout = _zero_if_not_array(ΔHout_raw, Hout)
+        ΔSout = _zero_if_not_array(ΔSout_raw, Sout)
+
+        # adjoint of hermitize: X -> (X + X')/2
+        ΔHsym = (ΔHout .+ permutedims(conj.(ΔHout), (2, 1, 3))) ./ 2
+        ΔSsym = (ΔSout .+ permutedims(conj.(ΔSout), (2, 1, 3))) ./ 2
+
+        TC = eltype(Hout)
+
+        vHbar = CUDA.zeros(TC, size(vH))
+        vSbar = CUDA.zeros(TC, size(vS))
+
+        threads = 256
+
+        # onsite
+        N_on = nat * NORB * NORB
+        blocks_on = cld(N_on, threads)
+
+        @cuda threads=threads blocks=blocks_on _assemble_dense_pullback_onsite_kernel!(
+            vHbar,
+            vSbar,
+            ΔHsym,
+            ΔSsym,
+            nat,
+            NORB,
+            nk,
+        )
+
+        # offsite
+        N_edge = NORB * NORB
+        blocks_edge = cld(N_edge, threads)
+
+        for e in 1:nedges
+            i = ii[e]
+            j = jj[e]
+
+            @cuda threads=threads blocks=blocks_edge _assemble_dense_pullback_offsite_kernel!(
+                vHbar,
+                vSbar,
+                ΔHsym,
+                ΔSsym,
+                klist,
+                Rcell,
+                e,
+                i,
+                j,
+                nat,
+                NORB,
+                nk,
+            )
+        end
+
+        return (
+            NoTangent(),  # typeof(_assemble_dense)
+            NoTangent(),  # G
+            vHbar,
+            vSbar,
+            NoTangent(),  # klist
+        )
+    end
+
+    return (Hout, Sout), pullback_assemble_dense_gpu
+end

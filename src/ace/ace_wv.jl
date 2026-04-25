@@ -149,6 +149,118 @@ function assemble_Wv(val_tuple)
     return Wv
 end
 
+function assemble_Wv(val_tuple::Tuple{Vararg{<:CUDA.CuArray}})
+    return _assemble_Wv_gpu(val_tuple)
+end
+
+using CUDA
+
+@inline function _wv_layout_meta(val_tuple)
+    n_atoms = size(val_tuple[1], 1)
+    nL = length(val_tuple)
+
+    L_offsets = Vector{Int}(undef, nL)
+
+    offset = 0
+    for Lidx in 1:nL
+        L = Lidx - 1
+        n_shells = size(val_tuple[Lidx], 2)
+        mlen = 2L + 1
+
+        L_offsets[Lidx] = offset
+        offset += n_shells * mlen
+    end
+
+    atom_stride = offset
+    total_len = n_atoms * atom_stride
+
+    return n_atoms, L_offsets, atom_stride, total_len
+end
+
+@inline _wv_perm_src(::Val{1}, m::Int) = ifelse(m == 1, 3, ifelse(m == 2, 1, 2))
+@inline _wv_perm_src(::Val{L}, m::Int) where {L} = m
+
+function _assemble_wv_L0_kernel!(Wv, blk, n_shells::Int, atom_stride::Int, Loff::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    n_atoms = size(blk, 1)
+    N = n_atoms * n_shells
+
+    if q <= N
+        t = q - 1
+        j = (t % n_shells) + 1
+        i = (t ÷ n_shells) + 1
+
+        dst = (i - 1) * atom_stride + Loff + j
+        Wv[dst] = blk[i, j]
+    end
+
+    return nothing
+end
+
+function _assemble_wv_L_kernel!(Wv, blk, n_shells::Int, atom_stride::Int, Loff::Int, ::Val{L}) where {L}
+    mlen = 2L + 1
+
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    n_atoms = size(blk, 1)
+    N = n_atoms * n_shells * mlen
+
+    if q <= N
+        t = q - 1
+
+        m = (t % mlen) + 1
+        t2 = t ÷ mlen
+
+        j = (t2 % n_shells) + 1
+        i = (t2 ÷ n_shells) + 1
+
+        src_m = _wv_perm_src(Val(L), m)
+
+        dst = (i - 1) * atom_stride + Loff + (j - 1) * mlen + m
+        Wv[dst] = blk[i, j][src_m]
+    end
+
+    return nothing
+end
+
+function _assemble_Wv_gpu(val_tuple)
+    n_atoms, L_offsets, atom_stride, total_len = _wv_layout_meta(val_tuple)
+
+    # L = 0 block has scalar element type Float32/Float64.
+    T = eltype(val_tuple[1])
+
+    Wv = CUDA.zeros(T, total_len)
+
+    threads = 256
+
+    for Lidx in 1:length(val_tuple)
+        L = Lidx - 1
+        blk = val_tuple[Lidx]
+        n_shells = size(blk, 2)
+        Loff = L_offsets[Lidx]
+
+        if n_shells == 0
+            continue
+        end
+
+        if L == 0
+            N = n_atoms * n_shells
+            blocks = cld(N, threads)
+            @cuda threads=threads blocks=blocks _assemble_wv_L0_kernel!(
+                Wv, blk, n_shells, atom_stride, Loff
+            )
+        else
+            mlen = 2L + 1
+            N = n_atoms * n_shells * mlen
+            blocks = cld(N, threads)
+            @cuda threads=threads blocks=blocks _assemble_wv_L_kernel!(
+                Wv, blk, n_shells, atom_stride, Loff, Val(L)
+            )
+        end
+    end
+
+    return Wv
+end
+
 # ---------------------------------------------------------------------------
 # ChainRules pullback for assemble_Wv
 # ---------------------------------------------------------------------------
@@ -203,6 +315,197 @@ function ChainRulesCore.rrule(::typeof(assemble_Wv), val_tuple)
     return y, pullback_Wv
 end
 
+
+
+
+using CUDA
+using StaticArrays
+using ChainRulesCore
+using ChainRulesCore: NoTangent, unthunk
+
+const CuValTuple = Tuple{Vararg{<:CUDA.CuArray}}
+
+# Same layout as assemble_Wv:
+# atom-major -> L-major -> shell-major -> m-minor
+@inline function _wv_layout_meta_gpu(val_tuple)
+    n_atoms = size(val_tuple[1], 1)
+    nL = length(val_tuple)
+
+    L_offsets = Vector{Int}(undef, nL)
+
+    offset = 0
+    for Lidx in 1:nL
+        L = Lidx - 1
+        n_shells = size(val_tuple[Lidx], 2)
+        mlen = 2L + 1
+
+        L_offsets[Lidx] = offset
+        offset += n_shells * mlen
+    end
+
+    atom_stride = offset
+    total_len = n_atoms * atom_stride
+
+    return n_atoms, L_offsets, atom_stride, total_len
+end
+
+function _assemble_Wv_gpu_pb_L0_kernel!(
+    Δblk,
+    ΔWv,
+    n_shells::Int,
+    atom_stride::Int,
+    Loff::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    n_atoms = size(Δblk, 1)
+    N = n_atoms * n_shells
+
+    if q <= N
+        t = q - 1
+
+        j = (t % n_shells) + 1
+        i = (t ÷ n_shells) + 1
+
+        src = (i - 1) * atom_stride + Loff + j
+
+        Δblk[i, j] = ΔWv[src]
+    end
+
+    return nothing
+end
+
+function _assemble_Wv_gpu_pb_L1_kernel!(
+    Δblk,
+    ΔWv,
+    n_shells::Int,
+    atom_stride::Int,
+    Loff::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    n_atoms = size(Δblk, 1)
+    N = n_atoms * n_shells
+
+    if q <= N
+        t = q - 1
+
+        j = (t % n_shells) + 1
+        i = (t ÷ n_shells) + 1
+
+        base = (i - 1) * atom_stride + Loff + (j - 1) * 3 + 1
+
+        T = eltype(eltype(Δblk))
+
+        # forward L=1 convention:
+        #   Wv[m=1] = v[3]
+        #   Wv[m=2] = v[1]
+        #   Wv[m=3] = v[2]
+        #
+        # backward:
+        #   dv[1] = dWv[m=2]
+        #   dv[2] = dWv[m=3]
+        #   dv[3] = dWv[m=1]
+        Δblk[i, j] = SVector{3,T}(
+            T(ΔWv[base + 1]),
+            T(ΔWv[base + 2]),
+            T(ΔWv[base]),
+        )
+    end
+
+    return nothing
+end
+
+function _assemble_Wv_gpu_pb_L_kernel!(
+    Δblk,
+    ΔWv,
+    n_shells::Int,
+    atom_stride::Int,
+    Loff::Int,
+    ::Val{L},
+) where {L}
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    n_atoms = size(Δblk, 1)
+    N = n_atoms * n_shells
+
+    if q <= N
+        t = q - 1
+
+        j = (t % n_shells) + 1
+        i = (t ÷ n_shells) + 1
+
+        Ncomp = 2L + 1
+        base = (i - 1) * atom_stride + Loff + (j - 1) * Ncomp + 1
+
+        T = eltype(eltype(Δblk))
+
+        Δblk[i, j] = SVector{Ncomp,T}(
+            ntuple(k -> T(ΔWv[base + k - 1]), Val(Ncomp))
+        )
+    end
+
+    return nothing
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(assemble_Wv),
+    val_tuple::CuValTuple,
+)
+    y = assemble_Wv(val_tuple)
+
+    n_atoms, L_offsets, atom_stride, total_len = _wv_layout_meta_gpu(val_tuple)
+
+    function pullback_assemble_Wv_gpu(Δy)
+        ΔWv = unthunk(Δy)
+
+        Δval_tuple = ntuple(length(val_tuple)) do Lidx
+            similar(val_tuple[Lidx])
+        end
+
+        threads = 256
+
+        for Lidx in 1:length(val_tuple)
+            L = Lidx - 1
+            n_shells = size(val_tuple[Lidx], 2)
+            Loff = L_offsets[Lidx]
+
+            n_shells == 0 && continue
+
+            N = n_atoms * n_shells
+            blocks = cld(N, threads)
+
+            if L == 0
+                @cuda threads=threads blocks=blocks _assemble_Wv_gpu_pb_L0_kernel!(
+                    Δval_tuple[Lidx],
+                    ΔWv,
+                    n_shells,
+                    atom_stride,
+                    Loff,
+                )
+            elseif L == 1
+                @cuda threads=threads blocks=blocks _assemble_Wv_gpu_pb_L1_kernel!(
+                    Δval_tuple[Lidx],
+                    ΔWv,
+                    n_shells,
+                    atom_stride,
+                    Loff,
+                )
+            else
+                @cuda threads=threads blocks=blocks _assemble_Wv_gpu_pb_L_kernel!(
+                    Δval_tuple[Lidx],
+                    ΔWv,
+                    n_shells,
+                    atom_stride,
+                    Loff,
+                    Val(L),
+                )
+            end
+        end
+
+        return NoTangent(), Δval_tuple
+    end
+
+    return y, pullback_assemble_Wv_gpu
+end
+
 # helper: build inverse permutation (as SVector) for the pullback
 @inline function _invperm_for_L(L::Int, perm)
     mlen = 2L + 1
@@ -217,11 +520,4 @@ function _ace_Wv_forward(ace_model, G, ps, st)
     return LuxCore.apply(ace_model, 
                                    G, 
                                    ps, st)
-    # embed: stop gradient w.r.t. G (G is not a parameter)
-    #Rnl_Ylm = Zygote.ignore() do
-    #    LuxCore.apply(ace_model.layers.embed, G, ps.embed, st.embed)[1]
-    #end
-    #st_embed = LuxCore.apply(ace_model.layers.embed, G, ps.embed, st.embed)[2]
-    #val_tuple, st_ace = LuxCore.apply(ace_model.layers.ace, Rnl_Ylm, ps.ace, st.ace)
-    #return val_tuple, (embed=st_embed, ace=st_ace)
 end

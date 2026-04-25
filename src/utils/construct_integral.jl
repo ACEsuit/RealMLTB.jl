@@ -164,3 +164,171 @@ function lmax_and_nchannels_per_atom(bs, atom_index::Int=1)
     n_channels = n_channels_from_shells(shells; lmax=lmax)
     return lmax, n_channels
 end
+
+using CUDA
+using ChainRulesCore
+using ChainRulesCore: NoTangent, unthunk
+
+# ---------------------------------------------------------------------------
+# Sparse3CGPU contraction
+# V_pair[a,b] += vals[q] * Wv[c]
+# ---------------------------------------------------------------------------
+
+function _sparse_contract_gpu_kernel!(
+    V_pair,
+    ia,
+    ib,
+    ic,
+    vals,
+    Wv,
+    nnz::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if q <= nnz
+        a = ia[q]
+        b = ib[q]
+        c = ic[q]
+
+        CUDA.@atomic V_pair[a, b] += vals[q] * Wv[c]
+    end
+
+    return nothing
+end
+
+function _sparse_contract_gpu(
+    Vraw::Sparse3CGPU,
+    Wv::CUDA.CuArray{<:Real,1},
+    nbas::Int,
+)
+    V_pair = CUDA.zeros(eltype(Wv), nbas, nbas)
+
+    nnz = length(Vraw.vals)
+    threads = 256
+    blocks = cld(nnz, threads)
+
+    @cuda threads=threads blocks=blocks _sparse_contract_gpu_kernel!(
+        V_pair,
+        Vraw.ia,
+        Vraw.ib,
+        Vraw.ic,
+        Vraw.vals,
+        Wv,
+        nnz,
+    )
+
+    return V_pair
+end
+
+function _construct_integral_core(
+    Wv::CUDA.CuArray{<:Real,1},
+    Wb::CUDA.CuArray{<:Real,2},
+    T_pair::CUDA.CuArray{<:Real,2},
+    V_pair_raw::Sparse3CGPU,
+    S_pair::CUDA.CuArray{<:Real,2},
+)
+    nbas = size(T_pair, 1)
+
+    V_pair = _sparse_contract_gpu(V_pair_raw, Wv, nbas)
+
+    A = T_pair .+ V_pair
+
+    H = Wb * A * Wb'
+    S = Wb * S_pair * Wb'
+
+    return H, S
+end
+
+
+function _sparse_contract_pullback_gpu_kernel!(
+    Wvbar,
+    ia,
+    ib,
+    ic,
+    vals,
+    ΔA,
+    nnz::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+
+    if q <= nnz
+        a = ia[q]
+        b = ib[q]
+        c = ic[q]
+
+        CUDA.@atomic Wvbar[c] += vals[q] * ΔA[a, b]
+    end
+
+    return nothing
+end
+
+function _sparse_contract_pullback_gpu(
+    Vraw::Sparse3CGPU,
+    ΔA::CUDA.CuArray{<:Real,2},
+    nwv::Int,
+)
+    Wvbar = CUDA.zeros(eltype(ΔA), nwv)
+
+    nnz = length(Vraw.vals)
+    threads = 256
+    blocks = cld(nnz, threads)
+
+    @cuda threads=threads blocks=blocks _sparse_contract_pullback_gpu_kernel!(
+        Wvbar,
+        Vraw.ia,
+        Vraw.ib,
+        Vraw.ic,
+        Vraw.vals,
+        ΔA,
+        nnz,
+    )
+
+    return Wvbar
+end
+
+
+function ChainRulesCore.rrule(
+    ::typeof(construct_integral),
+    Wv::CUDA.CuArray{<:Real,1},
+    Wb::CUDA.CuArray{<:Real,2},
+    T_pair::CUDA.CuArray{<:Real,2},
+    V_pair_raw::Sparse3CGPU,
+    S_pair::CUDA.CuArray{<:Real,2},
+)
+    nbas = size(T_pair, 1)
+
+    V_pair = _sparse_contract_gpu(V_pair_raw, Wv, nbas)
+
+    A = T_pair .+ V_pair
+
+    H = Wb * A * Wb'
+    S = Wb * S_pair * Wb'
+
+    function pullback_construct_integral_sparsegpu(ΔΩ)
+        ΔH, ΔS = unthunk(ΔΩ[1]), unthunk(ΔΩ[2])
+
+        ΔWb_H = ΔH * Wb * A'      + ΔH' * Wb * A
+        ΔWb_S = ΔS * Wb * S_pair' + ΔS' * Wb * S_pair
+
+        Wbbar = real.(ΔWb_H .+ ΔWb_S)
+
+        ΔA = real.(Wb' * ΔH * Wb)
+
+        Wvbar = _sparse_contract_pullback_gpu(
+            V_pair_raw,
+            ΔA,
+            length(Wv),
+        )
+
+        return (
+            NoTangent(),
+            Wvbar,
+            Wbbar,
+            NoTangent(),
+            NoTangent(),
+            NoTangent(),
+        )
+    end
+
+    return (H, S), pullback_construct_integral_sparsegpu
+end

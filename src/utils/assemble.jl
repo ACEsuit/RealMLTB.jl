@@ -198,6 +198,291 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
     return (vH, vS), pullback
 end
 
+using CUDA
+using GaussianBasis
+
+function _copy_siteblock_kernel!(
+    vH, vS,
+    Hfull, Sfull,
+    i::Int, j::Int, idx::Int,
+    NORB::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * NORB
+
+    if q <= N
+        t = q - 1
+
+        b = (t % NORB) + 1
+        a = (t ÷ NORB) + 1
+
+        row = (i - 1) * NORB + a
+        col = (j - 1) * NORB + b
+
+        vH[a, b, idx] = Hfull[row, col]
+        vS[a, b, idx] = Sfull[row, col]
+    end
+
+    return nothing
+end
+
+function _3center_triplet(
+    G,
+    basis::BasisSet,
+    Wv::CUDA.CuArray{<:Real,1},
+    Wb::CUDA.CuArray{<:Real,2},
+)
+    cache = G.graph_data.threecenter_cache
+
+    ii = cache.ii
+    jj = cache.jj
+
+    nat  = cache.nat
+    NORB = cache.NORB
+
+    TV = eltype(Wv)
+    nedges = length(ii)
+    nblocks = nat + nedges
+
+    vH = CUDA.zeros(TV, NORB, NORB, nblocks)
+    vS = CUDA.zeros(TV, NORB, NORB, nblocks)
+
+    threads = 256
+    blocks = cld(NORB * NORB, threads)
+
+    # onsite: use cache, not G.graph_data
+    H_AO_on, S_AO_on = construct_integral(
+        Wv,
+        Wb,
+        cache.T_on,
+        cache.V_on,
+        cache.S_on,
+    )
+
+    for i in 1:nat
+        @cuda threads=threads blocks=blocks _copy_siteblock_kernel!(
+            vH, vS,
+            H_AO_on, S_AO_on,
+            i, i, i,
+            NORB,
+        )
+    end
+
+    # offsite: use cache.T_pair/V_pair/S_pair, not edge_data/integral_table
+    for e in 1:nedges
+        i = ii[e]
+        j = jj[e]
+
+        H_AO_off, S_AO_off = construct_integral(
+            Wv,
+            Wb,
+            cache.T_pair[e],
+            cache.V_pair[e],
+            cache.S_pair[e],
+        )
+
+        idx = nat + e
+
+        @cuda threads=threads blocks=blocks _copy_siteblock_kernel!(
+            vH, vS,
+            H_AO_off, S_AO_off,
+            i, j, idx,
+            NORB,
+        )
+    end
+
+    return vH, vS
+end
+
+
+using CUDA
+using ChainRulesCore
+using ChainRulesCore: NoTangent, unthunk
+
+function _scatter_siteblock_adjoint_kernel!(
+    ΔHfull,
+    ΔSfull,
+    ΔvH,
+    ΔvS,
+    i::Int,
+    j::Int,
+    idx::Int,
+    NORB::Int,
+)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * NORB
+
+    if q <= N
+        t = q - 1
+
+        b = (t % NORB) + 1
+        a = (t ÷ NORB) + 1
+
+        row = (i - 1) * NORB + a
+        col = (j - 1) * NORB + b
+
+        ΔHfull[row, col] += ΔvH[a, b, idx]
+        ΔSfull[row, col] += ΔvS[a, b, idx]
+    end
+
+    return nothing
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(_3center_triplet),
+    G,
+    basis::BasisSet,
+    Wv::CUDA.CuArray{<:Real,1},
+    Wb::CUDA.CuArray{<:Real,2},
+)
+    cache = G.graph_data.threecenter_cache
+
+    ii = cache.ii
+    jj = cache.jj
+
+    nat = cache.nat
+    NORB = cache.NORB
+    nedges = length(ii)
+    nblocks = nat + nedges
+    dim = nat * NORB
+
+    TV = eltype(Wv)
+
+    vH = CUDA.zeros(TV, NORB, NORB, nblocks)
+    vS = CUDA.zeros(TV, NORB, NORB, nblocks)
+
+    threads = 256
+    blocks = cld(NORB * NORB, threads)
+
+    # -------------------------
+    # onsite forward + pullback
+    # -------------------------
+    (H_AO_on, S_AO_on), pb_on = ChainRulesCore.rrule(
+        construct_integral,
+        Wv,
+        Wb,
+        cache.T_on,
+        cache.V_on,
+        cache.S_on,
+    )
+
+    for i in 1:nat
+        @cuda threads=threads blocks=blocks _copy_siteblock_kernel!(
+            vH,
+            vS,
+            H_AO_on,
+            S_AO_on,
+            i,
+            i,
+            i,
+            NORB,
+        )
+    end
+
+    # -------------------------
+    # offsite forward + pullbacks
+    # -------------------------
+    pb_offs = Vector{Any}(undef, nedges)
+
+    for e in 1:nedges
+        (H_AO_off, S_AO_off), pb_e = ChainRulesCore.rrule(
+            construct_integral,
+            Wv,
+            Wb,
+            cache.T_pair[e],
+            cache.V_pair[e],
+            cache.S_pair[e],
+        )
+
+        pb_offs[e] = pb_e
+
+        i = ii[e]
+        j = jj[e]
+        idx = nat + e
+
+        @cuda threads=threads blocks=blocks _copy_siteblock_kernel!(
+            vH,
+            vS,
+            H_AO_off,
+            S_AO_off,
+            i,
+            j,
+            idx,
+            NORB,
+        )
+    end
+
+    function pullback_3center_gpu(ΔΩ)
+        ΔvH = unthunk(ΔΩ[1])
+        ΔvS = unthunk(ΔΩ[2])
+
+        TΔ = eltype(ΔvH)
+
+        # -------------------------
+        # onsite adjoint
+        # -------------------------
+        ΔH_on = CUDA.zeros(TΔ, dim, dim)
+        ΔS_on = CUDA.zeros(TΔ, dim, dim)
+
+        for i in 1:nat
+            @cuda threads=threads blocks=blocks _scatter_siteblock_adjoint_kernel!(
+                ΔH_on,
+                ΔS_on,
+                ΔvH,
+                ΔvS,
+                i,
+                i,
+                i,
+                NORB,
+            )
+        end
+
+        _, Wvbar_on, Wbbar_on, _, _, _ = pb_on((ΔH_on, ΔS_on))
+
+        Wvbar = copy(Wvbar_on)
+        Wbbar = copy(Wbbar_on)
+
+        # -------------------------
+        # offsite adjoints
+        # -------------------------
+        for e in 1:nedges
+            ΔH_e = CUDA.zeros(TΔ, dim, dim)
+            ΔS_e = CUDA.zeros(TΔ, dim, dim)
+
+            i = ii[e]
+            j = jj[e]
+            idx = nat + e
+
+            @cuda threads=threads blocks=blocks _scatter_siteblock_adjoint_kernel!(
+                ΔH_e,
+                ΔS_e,
+                ΔvH,
+                ΔvS,
+                i,
+                j,
+                idx,
+                NORB,
+            )
+
+            _, Wvbar_e, Wbbar_e, _, _, _ = pb_offs[e]((ΔH_e, ΔS_e))
+
+            Wvbar .+= Wvbar_e
+            Wbbar .+= Wbbar_e
+        end
+
+        return (
+            NoTangent(),  # typeof(_3center_triplet)
+            NoTangent(),  # G
+            NoTangent(),  # basis
+            Wvbar,
+            Wbbar,
+        )
+    end
+
+    return (vH, vS), pullback_3center_gpu
+end
+
+
 function generate_λ_and_vecs(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
     L  = cholesky(S).L
     A  = L \ (H / L')
@@ -213,4 +498,144 @@ function generate_λ_and_vecs(Hlist::AbstractVector{TH}, Slist::AbstractVector{T
     λlist = [r[1] for r in results]
     Vlist = [r[2] for r in results]
     return λlist, Vlist
+end
+
+using CUDA
+using LinearAlgebra
+
+function generate_λ_and_vecs(
+    H::CUDA.CuArray{<:Complex,2},
+    S::CUDA.CuArray{<:Complex,2},
+)
+    # S = U' * U
+    Fchol = cholesky(Hermitian(S, :U))
+    U = Fchol.U
+
+    # Transform generalized eigenproblem:
+    # H v = λ S v, S = U' U
+    # A y = λ y, A = U' \ H / U, v = U \ y
+    A = U' \ (H / U)
+    A = (A .+ A') ./ 2
+
+    F = eigen(Hermitian(A, :U))
+
+    λ = F.values
+    Y = F.vectors
+
+    V = U \ Y
+
+    return λ, V
+end
+
+function generate_λ_and_vecs(
+    Hout::CUDA.CuArray{T,3},
+    Sout::CUDA.CuArray{T,3},
+) where {T <: Complex}
+
+    nk = size(Hout, 3)
+
+    λ1, V1 = generate_λ_and_vecs(
+        copy(@view Hout[:, :, 1]),
+        copy(@view Sout[:, :, 1]),
+    )
+
+    λlist = Vector{typeof(λ1)}(undef, nk)
+    Vlist = Vector{typeof(V1)}(undef, nk)
+
+    λlist[1] = λ1
+    Vlist[1] = V1
+
+    for ik in 2:nk
+        Hk = copy(@view Hout[:, :, ik])
+        Sk = copy(@view Sout[:, :, ik])
+
+        λ, V = generate_λ_and_vecs(Hk, Sk)
+
+        λlist[ik] = λ
+        Vlist[ik] = V
+    end
+
+    return λlist, Vlist
+end
+
+using CUDA
+using ChainRulesCore
+using ChainRulesCore: NoTangent, ZeroTangent, unthunk
+
+_to_cu(x) = x isa CUDA.CuArray ? x : CUDA.cu(x)
+
+function _zero_like_complex_array(A)
+    return CUDA.zeros(eltype(A), size(A))
+end
+
+function _is_zero_tangent(x)
+    return x === nothing || x isa NoTangent || x isa ZeroTangent
+end
+
+function _eigenvalue_pullback_one_k(λk, Vk, Δλk, Hk)
+    λg = _to_cu(real.(λk))
+    Vg = _to_cu(Vk)
+    gg = _to_cu(real.(Δλk))
+
+    # V * diag(g) * V'
+    VH = (Vg .* reshape(complex.(gg), 1, :)) * Vg'
+
+    # -V * diag(g .* λ) * V'
+    VS = -((Vg .* reshape(complex.(gg .* λg), 1, :)) * Vg')
+
+    # Match H/S element type
+    return eltype(Hk).(VH), eltype(Hk).(VS)
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(generate_λ_and_vecs),
+    Hout::CUDA.CuArray{T,3},
+    Sout::CUDA.CuArray{T,3},
+) where {T <: Complex}
+
+    λlist, Vlist = generate_λ_and_vecs(Hout, Sout)
+
+    function pullback_generate_λ_and_vecs(ΔΩ)
+        Δλ_raw = unthunk(ΔΩ[1])
+        ΔV_raw = unthunk(ΔΩ[2])
+
+        Hbar = _zero_like_complex_array(Hout)
+        Sbar = _zero_like_complex_array(Sout)
+
+        if _is_zero_tangent(Δλ_raw)
+            return NoTangent(), Hbar, Sbar
+        end
+
+        if !_is_zero_tangent(ΔV_raw)
+            @warn "generate_λ_and_vecs rrule currently ignores gradients through Vlist; only eigenvalue gradients are handled."
+        end
+
+        nk = size(Hout, 3)
+
+        for ik in 1:nk
+            Δλk = Δλ_raw[ik]
+
+            if _is_zero_tangent(Δλk)
+                continue
+            end
+
+            Hk = @view Hout[:, :, ik]
+
+            Hbar_k, Sbar_k = _eigenvalue_pullback_one_k(
+                λlist[ik],
+                Vlist[ik],
+                Δλk,
+                Hk,
+            )
+
+            @views begin
+                Hbar[:, :, ik] .= Hbar_k
+                Sbar[:, :, ik] .= Sbar_k
+            end
+        end
+
+        return NoTangent(), Hbar, Sbar
+    end
+
+    return (λlist, Vlist), pullback_generate_λ_and_vecs
 end

@@ -32,6 +32,98 @@ function kron_I_atoms(NATOM::Int, Wb_atom::AbstractMatrix)
     return kron(Matrix{eltype(Wb_atom)}(I, NATOM, NATOM), Wb_atom)
 end
 
+function _kron_I_atoms_kernel!(Wb, Wb_atom, NATOM::Int, NORB::Int, Nb::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NATOM * NORB * Nb
+
+    if q <= N
+        t = q - 1
+
+        b = (t % Nb) + 1
+        t = t ÷ Nb
+
+        a = (t % NORB) + 1
+        I = (t ÷ NORB) + 1
+
+        row = (I - 1) * NORB + a
+        col = (I - 1) * Nb   + b
+
+        Wb[row, col] = Wb_atom[a, b]
+    end
+
+    return nothing
+end
+
+# GPU method: same public name
+function kron_I_atoms(NATOM::Int, Wb_atom::CUDA.CuArray{T,2}) where {T}
+    NORB, Nb = size(Wb_atom)
+
+    Wb = CUDA.zeros(T, NATOM * NORB, NATOM * Nb)
+
+    threads = 256
+    N = NATOM * NORB * Nb
+    blocks = cld(N, threads)
+
+    @cuda threads=threads blocks=blocks _kron_I_atoms_kernel!(
+        Wb, Wb_atom, NATOM, NORB, Nb
+    )
+
+    return Wb
+end
+
+function _kron_I_atoms_pullback_kernel!(ΔWb_atom, ΔWb, NATOM::Int, NORB::Int, Nb::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * Nb
+
+    if q <= N
+        t = q - 1
+
+        b = (t % Nb) + 1
+        a = (t ÷ Nb) + 1
+
+        acc = zero(eltype(ΔWb_atom))
+
+        for I in 1:NATOM
+            row = (I - 1) * NORB + a
+            col = (I - 1) * Nb   + b
+
+            acc += eltype(ΔWb_atom)(real(ΔWb[row, col]))
+        end
+
+        ΔWb_atom[a, b] = acc
+    end
+
+    return nothing
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(kron_I_atoms),
+    NATOM::Int,
+    Wb_atom::CUDA.CuArray{T,2},
+) where {T}
+
+    Wb = kron_I_atoms(NATOM, Wb_atom)
+
+    function pullback_kron_I_atoms(ΔWb_raw)
+        ΔWb = ChainRulesCore.unthunk(ΔWb_raw)
+
+        NORB, Nb = size(Wb_atom)
+        ΔWb_atom = CUDA.zeros(T, NORB, Nb)
+
+        threads = 256
+        N = NORB * Nb
+        blocks = cld(N, threads)
+
+        @cuda threads=threads blocks=blocks _kron_I_atoms_pullback_kernel!(
+            ΔWb_atom, ΔWb, NATOM, NORB, Nb
+        )
+
+        return ChainRulesCore.NoTangent(), ChainRulesCore.NoTangent(), ΔWb_atom
+    end
+
+    return Wb, pullback_kron_I_atoms
+end
+
 # ---------------------------------------------------------------------------
 # Helper: update the basisset stored in `st` so the model can be applied
 # to a system with a different number of atoms / cell geometry.
