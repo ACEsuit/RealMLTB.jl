@@ -184,7 +184,8 @@ function compute_spherical_AO_integrals(bs_in::BasisSet)
     return T_sph, V_sph, S_sph
 end
 
-function compute_spherical_AO_integrals_sparse(bs_in::BasisSet; cutoff=1e-12)
+function compute_spherical_AO_integrals_sparse(bs_in::BasisSet;
+                                                cutoff=1e-12, ntasks=1)
     bs_cart =
         if (bs_in.basis[1] isa SphericalShell) || (bs_in.lib != :acsint)
             BasisSet(bs_in.name, bs_in.atoms; spherical=false, lib=:acsint)
@@ -211,7 +212,7 @@ function compute_spherical_AO_integrals_sparse(bs_in::BasisSet; cutoff=1e-12)
     N_sph  = size(C, 2)
 
     cart_cutoff = cutoff * 1e-3
-    indexes, vals = sparseEPI_1e3c(bs_cart, bs_cart, cart_cutoff)
+    indexes, vals = sparseEPI_1e3c(bs_cart, bs_cart, cart_cutoff; ntasks=ntasks)
 
     V_sph_raw = zeros(N_sph, N_sph, N_sph)
     @inbounds for n in eachindex(vals)

@@ -17,11 +17,8 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
     reshape(reshape(out, N^2, N) * coef, N, N)
 end
 
-function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
-    ntasks = Threads.nthreads()
-    local_indexes = [NTuple{3,Int16}[] for _ in 1:ntasks]
-    local_vals    = [Cdouble[]         for _ in 1:ntasks]
-
+function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12;
+                        ntasks=Threads.nthreads())
     Nvals1 = num_basis.(BS1.basis)
     Nvals2 = num_basis.(BS2.basis)
     Nmax1 = maximum(Nvals1)
@@ -43,11 +40,15 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
         push!(ki_vals, i_vals)
     end
 
+    results_lock = ReentrantLock()
+    all_indexes = NTuple{3,Int16}[]
+    all_vals    = Cdouble[]
+
     allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
-    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1, ntasks=1) do k, buf
-        tid = Threads.threadid()
-        l_idx = local_indexes[tid]
-        l_val = local_vals[tid]
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells;
+                             chunksize=1, ntasks=ntasks) do k, buf
+        local_idx = NTuple{3,Int16}[]
+        local_val = Cdouble[]
         @inbounds begin
             Nk = Nvals2[k]
             koff = ao_offset2[k]
@@ -73,11 +74,11 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
                                     nijk = Ni * Nj * (nk - 1) + Ni * (nj - 1) + ni
                                     val = buf[nijk]
                                     if abs(val) > cutoff
-                                        push!(l_idx, (nI, nJ, nK))
-                                        push!(l_val, val)
+                                        push!(local_idx, (nI, nJ, nK))
+                                        push!(local_val, val)
                                         if nI < nJ
-                                            push!(l_idx, (nJ, nI, nK))
-                                            push!(l_val, val)
+                                            push!(local_idx, (nJ, nI, nK))
+                                            push!(local_val, val)
                                         end
                                     end
                                 end
@@ -87,11 +88,13 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12)
                 end
             end
         end
+        lock(results_lock) do
+            append!(all_indexes, local_idx)
+            append!(all_vals, local_val)
+        end
     end
 
-    indexes = reduce(vcat, local_indexes)
-    out     = reduce(vcat, local_vals)
-    return indexes, out
+    return all_indexes, all_vals
 end
 
 function EPI_1e3c(BS1::BasisSet, BS2::BasisSet)
@@ -99,7 +102,8 @@ function EPI_1e3c(BS1::BasisSet, BS2::BasisSet)
     EPI_1e3c!(out, BS1, BS2)
 end
 
-function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
+function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet;
+                   ntasks=Threads.nthreads())
     Nvals1 = num_basis.(BS1.basis)
     Nvals2 = num_basis.(BS2.basis)
     Nmax1 = maximum(Nvals1)
@@ -109,11 +113,13 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
     ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
 
     allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
-    GaussianBasis.workerpool(allocate, 1:BS2.nshells; chunksize=1, ntasks=1) do k, buf
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells;
+                             chunksize=1, ntasks=ntasks) do k, buf
         @inbounds begin
             Nk = Nvals2[k]
             koff = ao_offset2[k]
             K = (koff+1):(koff+Nk)
+
             for i in 1:BS1.nshells
                 for j = i:BS1.nshells
                     Ni = Nvals1[i]
@@ -133,6 +139,7 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet)
             end
         end
     end
+
     return out
 end
 

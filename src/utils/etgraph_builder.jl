@@ -32,11 +32,13 @@ function compute_pair_spherical_AO_integrals(bs_in::BasisSet, R_bohr)
     return T_pair_sph, V_pair_sph, S_pair_sph
 end
 
-function compute_pair_spherical_AO_integrals_sparse(bs_in::BasisSet, R_bohr; cutoff=1e-12)
-    bs, bs_R, C, d_sph, S_pair_sph, T_pair_sph = one_body_pair_spherical_AO_integrals(bs_in, R_bohr)
+function compute_pair_spherical_AO_integrals_sparse(bs_in::BasisSet, R_bohr;
+                                                     cutoff=1e-12, ntasks=1)
+    bs, bs_R, C, d_sph, S_pair_sph, T_pair_sph =
+        one_body_pair_spherical_AO_integrals(bs_in, R_bohr)
 
     cart_cutoff = cutoff * 1e-3
-    indexes, vals = sparseEPI_1e3c(bs, bs_R, cart_cutoff)
+    indexes, vals = sparseEPI_1e3c(bs, bs_R, cart_cutoff; ntasks=ntasks)
 
     N_sph  = size(C, 2)
     N_cart = bs_R.nbas
@@ -99,95 +101,105 @@ function one_body_pair_spherical_AO_integrals(bs_in::BasisSet, R_bohr)
     return (; bs, bs_R, C, d_sph, S_pair_sph, T_pair_sph)
 end
 
-function nlist2graph(bs::BasisSet, nlist, sys, klist)
-    bs_use =
-        if bs.basis[1] isa SphericalShell
-            bs
-        else
-            BasisSet(bs.name, bs.atoms; spherical=true, lib=:acsint)
-        end
+function _rcell_key(R_cell::SVector{3,Float64}; digits=8)
+    return (round(R_cell[1]; digits), round(R_cell[2]; digits), round(R_cell[3]; digits))
+end
 
+function nlist2graph(bs::BasisSet, nlist, sys, klist)
+    bs_use = if bs.basis[1] isa SphericalShell
+        bs
+    else
+        BasisSet(bs.name, bs.atoms; spherical=true, lib=:acsint)
+    end
+ 
     X     = position(sys, :)
     ii    = copy(nlist.i)
     jj    = copy(nlist.j)
     first = copy(nlist.first)
-
+ 
     npairs      = length(ii)
     R_cart_list = [NeighbourLists._getR(nlist, e) for e in 1:npairs]
     z0_list     = [NeighbourLists.AtomsBase.species(sys, i) for i in ii]
     z1_list     = [NeighbourLists.AtomsBase.species(sys, j) for j in jj]
-
-    Tlist      = Vector{Matrix{Float64}}(undef, npairs)
-    Vlist      = Vector{Tuple{Vector{NTuple{3,Int}}, Vector{Float64}}}(undef, npairs)
-    Slist      = Vector{Matrix{Float64}}(undef, npairs)
+ 
     Rcell_list = Vector{SVector{3,Float64}}(undef, npairs)
-
-    nthreads = Threads.nthreads()
-    println("Computing $npairs pair integrals on $nthreads threads ...")
-    flush(stdout)
-
-    bs_per_thread = [BasisSet(bs_use.name, bs_use.atoms; spherical=true, lib=:acsint)
-                     for _ in 1:nthreads]
-
-    t0 = time()
-
-    Threads.@threads for e in 1:npairs
-        tid    = Threads.threadid()
-        bs_loc = bs_per_thread[tid]
-
-        i = ii[e]
-        j = jj[e]
-
+    for e in 1:npairs
         R_vec  = R_cart_list[e]
-        R_cell = (R_vec - UnitfulAtomic.ustrip.(X[j] - X[i])) .* RealMLTB.ang2bohr
-        R_cell = SVector{3,Float64}(R_cell)
-
-        if norm(R_cell) < 1e-10
-            T_pair, V_pair, S_pair = compute_spherical_AO_integrals_sparse(bs_loc)
-        else
-            T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals_sparse(bs_loc, R_cell)
-        end
-
-        Rcell_list[e] = R_cell
-        Tlist[e]      = T_pair
-        Vlist[e]      = V_pair
-        Slist[e]      = S_pair
+        R_cell = (R_vec - UnitfulAtomic.ustrip.(X[jj[e]] - X[ii[e]])) .* RealMLTB.ang2bohr
+        Rcell_list[e] = SVector{3,Float64}(R_cell)
     end
-
-    elapsed = round(time() - t0; digits=1)
-    println("  Done in $(elapsed)s. Building ETGraph ...")
+ 
+    rcell_to_idx = Dict{NTuple{3,Float64}, Int}()
+    unique_Rcells = SVector{3,Float64}[]
+ 
+    integral_idx_per_edge = Vector{Int}(undef, npairs)
+    for e in 1:npairs
+        key = _rcell_key(Rcell_list[e])
+        if !haskey(rcell_to_idx, key)
+            push!(unique_Rcells, Rcell_list[e])
+            rcell_to_idx[key] = length(unique_Rcells)
+        end
+        integral_idx_per_edge[e] = rcell_to_idx[key]
+    end
+ 
+    n_unique = length(unique_Rcells)
+    println("$npairs edges → $n_unique unique R_cell vectors ($(round(100*(1 - n_unique/npairs); digits=1))% dedup)")
     flush(stdout)
-
+ 
+    Tlist_u = Vector{Matrix{Float64}}(undef, n_unique)
+    Vlist_u = Vector{Tuple{Vector{NTuple{3,Int}}, Vector{Float64}}}(undef, n_unique)
+    Slist_u = Vector{Matrix{Float64}}(undef, n_unique)
+ 
+    println("Computing $n_unique unique pair integrals ...")
+    flush(stdout)
+ 
+    Threads.@threads for u in 1:n_unique
+        R_cell = unique_Rcells[u]
+        if norm(R_cell) < 1e-10
+            T_pair, V_pair, S_pair = compute_spherical_AO_integrals_sparse(bs_use; ntasks=1)
+        else
+            T_pair, V_pair, S_pair = compute_pair_spherical_AO_integrals_sparse(bs_use, R_cell; ntasks=1)
+        end
+        Tlist_u[u] = T_pair
+        Vlist_u[u] = V_pair
+        Slist_u[u] = S_pair
+    end
+ 
+    integral_table = [
+        (R_cell = unique_Rcells[u], T_pair = Tlist_u[u], V_pair = Vlist_u[u], S_pair = Slist_u[u])
+        for u in 1:n_unique
+    ]
+ 
     edge_data = [
         (
-            𝐫      = R_cart_list[e],
-            z0     = z0_list[e],
-            z1     = z1_list[e],
-            R_cell = Rcell_list[e],
-            T_pair = Tlist[e],
-            V_pair = Vlist[e],
-            S_pair = Slist[e],
+            𝐫            = R_cart_list[e],
+            z0           = z0_list[e],
+            z1           = z1_list[e],
+            R_cell       = Rcell_list[e],
+            integral_idx = integral_idx_per_edge[e],
         )
         for e in 1:npairs
     ]
-
+ 
     T_on, V_on, S_on = compute_spherical_AO_integrals_sparse(bs_use)
     klist_phys = physical_k.(Ref(sys), klist)
-
+ 
     G = EquivariantTensors.ETGraph(
         ii, jj;
         edge_data  = edge_data,
         graph_data = (
-            klist = klist_phys,
-            T_on  = T_on,
-            V_on  = V_on,
-            S_on  = S_on,
-        )
+            klist           = klist_phys,
+            T_on            = T_on,
+            V_on            = V_on,
+            S_on            = S_on,
+            integral_table  = integral_table,
+        ),
     )
-
+ 
     @assert G.first == first
     return G
 end
+
 
 function physical_k(sys, k_reduced::SVector{3,<:Real})
     lattice = get_lattice(sys)

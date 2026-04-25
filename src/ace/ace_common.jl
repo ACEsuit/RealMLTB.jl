@@ -10,6 +10,8 @@ using LinearAlgebra
 using StaticArrays
 using Random
 
+import EquivariantTensors as ET
+
 # ---------------------------------------------------------------------------
 # Helper: safe index into tuple/vector (returns 0 when out of range)
 # ---------------------------------------------------------------------------
@@ -52,26 +54,23 @@ function ace_make_embed(rcut; Dtot::Int = 9, maxl::Int = 5)
 
     rcut_ang = ustrip(u"Å", rcut)
 
-    ycut = 1 / 2
-    env(y) = (y - ycut)^2 * (y + ycut)^2
+    env(y) = (y - 1)^2 * (y + 1)^2
 
+    # generate the radial transform 
+    trans_r = ET.dp_transform( (x, st) -> 1 / (1 + norm(x.𝐫) / st.rcut), 
+                            (;rcut = rcut_ang) )
+    
     rbasis = Lux.Chain(
-        trans = EquivariantTensors.NTtransformST(
-            (x, st) -> 1 / (1 + norm(x.𝐫) / rcut_ang),
-            NamedTuple()
-        ),
+        trans = trans_r, 
         post = Lux.SkipConnection(
             polys,
             Lux.WrappedFunction(PY -> env.(PY[2]) .* PY[1])
         )
-    )
+    )    
     Rnl_embed = EquivariantTensors.EdgeEmbed(rbasis)
 
     ybasis = Lux.Chain(
-        trans = EquivariantTensors.NTtransformST(
-            (x, st) -> x.𝐫,
-            NamedTuple()
-        ),
+        trans = ET.dp_transform((x, st) -> x.𝐫, NamedTuple()), 
         basis = ybas
     )
     Ylm_embed = EquivariantTensors.EdgeEmbed(ybasis)

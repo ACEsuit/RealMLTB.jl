@@ -25,9 +25,9 @@ using StaticArrays
     end
 end
 
-@inline _edge_T(ed) = ed.T_pair
-@inline _edge_V(ed) = ed.V_pair
-@inline _edge_S(ed) = ed.S_pair
+@inline _edge_T(ed, integral_table) = integral_table[ed.integral_idx].T_pair
+@inline _edge_V(ed, integral_table) = integral_table[ed.integral_idx].V_pair
+@inline _edge_S(ed, integral_table) = integral_table[ed.integral_idx].S_pair
 
 # ---------------------------------------------------------------------------
 # _3center_triplet
@@ -45,6 +45,7 @@ function _3center_triplet(G, basis::BasisSet,
                           Wb::AbstractMatrix)
     ii, jj = _get_ii_jj(G)
     edge_data = G.edge_data
+    integral_table = G.graph_data.integral_table
 
     T_on = G.graph_data.T_on
     V_on = G.graph_data.V_on
@@ -73,7 +74,10 @@ function _3center_triplet(G, basis::BasisSet,
         ed = edge_data[e]
 
         H_AO_off, S_AO_off = construct_integral(
-            Wv, Wb, _edge_T(ed), _edge_V(ed), _edge_S(ed))
+            Wv, Wb,
+            _edge_T(ed, integral_table),
+            _edge_V(ed, integral_table),
+            _edge_S(ed, integral_table))
 
         Hij, Sij = siteblock(H_AO_off, S_AO_off, ao_ranges, i, j)
         idx = nat + e
@@ -94,6 +98,7 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
                               Wb::AbstractMatrix)
     ii, jj    = _get_ii_jj(G)
     edge_data = G.edge_data
+    integral_table = G.graph_data.integral_table
 
     T_on = G.graph_data.T_on
     V_on = G.graph_data.V_on
@@ -125,7 +130,10 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
 
         (H_AO_off, S_AO_off), pb_off =
             ChainRulesCore.rrule(construct_integral,
-                                 Wv, Wb, _edge_T(ed), _edge_V(ed), _edge_S(ed))
+                                 Wv, Wb,
+                                 _edge_T(ed, integral_table),
+                                 _edge_V(ed, integral_table),
+                                 _edge_S(ed, integral_table))
         pb_offs[e] = pb_off
 
         Hij, Sij = siteblock(H_AO_off, S_AO_off, ao_ranges, i, j)
@@ -153,7 +161,7 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
         _, Wv̄_on, Wb̄_on, _, _, _ = pb_on((ΔH_on, ΔS_on))
 
         # ---- thread-local accumulators ----
-        nth = nthreads()
+        nth = Threads.maxthreadid()
         Wv̄_tls = [zeros(TΔ, length(Wv̄_on)) for _ in 1:nth]
         Wb̄_tls = [zeros(TΔ, size(Wb̄_on))   for _ in 1:nth]
 
