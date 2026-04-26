@@ -116,8 +116,6 @@ e1 = [ (R_cell = e.R_cell, 𝐫 = e.𝐫, z0 = e.z0, z1 = e.z1)
        for e in G.edge_data ]
 G1 = ET.ETGraph(G.ii, G.jj, G.first, G.node_data, e1, G.graph_data, G.maxneigs)
 
-ps_gpu = dev(ps)
-st_gpu = dev(st)
 G_gpu = dev(ET.float32(G1))
 
 # out, st = model(G_gpu, ps_gpu, st_gpu)
@@ -131,3 +129,15 @@ st_ace_gpu = dev(st_ace)
 ##
 
 out_ace, _ = model_ace(G_gpu, ps_ace_gpu, st_ace_gpu)
+
+using Zygote
+
+out, pb = Zygote.pullback(ps -> model_ace(G, ps, st_ace), ps_ace)
+grads = pb(out) # works on CPU
+
+out, pb = Zygote.pullback(ps -> model_ace(G_gpu, ps, st_ace_gpu), ps_ace_gpu)
+grads = pb(out)
+# ERROR: Scalar indexing is disallowed.
+# pullback!(∂X::Vector{…}, ∂P::CuArray{…}, basis::Polynomials4ML.RealSCWrapper{…}, X::CuArray{…}; dP::CuArray{…})
+# @ Polynomials4ML ~/.julia/packages/Polynomials4ML/XDA09/src/generic_ad.jl:31
+
