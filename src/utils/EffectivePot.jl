@@ -17,71 +17,73 @@ function EffectivePot!(out, BS::BasisSet, coef::AbstractVector)
     reshape(reshape(out, N^2, N) * coef, N, N)
 end
 
-function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12;
-                        ntasks=Threads.nthreads())
+function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, BS3::BasisSet,
+                        cutoff=1e-12; ntasks=Threads.nthreads())
     Nvals1 = num_basis.(BS1.basis)
     Nvals2 = num_basis.(BS2.basis)
+    Nvals3 = num_basis.(BS3.basis)
     Nmax1 = maximum(Nvals1)
     Nmax2 = maximum(Nvals2)
+    Nmax3 = maximum(Nvals3)
 
-    ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
-    ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
+    ao_offset1 = cumsum([0; Nvals1[1:end-1]])
+    ao_offset2 = cumsum([0; Nvals2[1:end-1]])
+    ao_offset3 = cumsum([0; Nvals3[1:end-1]])
 
+    cutoff_sq = cutoff^2
     tmp = zeros(Cdouble, Nmax1 * Nmax2)
-    ki_vals = Vector{Int16}[]
-    for (s2, bs2) in enumerate(BS2.basis)
+    ji_vals = Vector{Int16}[]
+    for bs2 in BS2.basis
         i_vals = Int16[]
         for (s1, bs1) in enumerate(BS1.basis)
             generate_S2_pair!(tmp, bs1, bs2)
-            if √maximum(tmp) > cutoff
+            if maximum(tmp) > cutoff_sq
                 push!(i_vals, s1)
             end
         end
-        push!(ki_vals, i_vals)
+        push!(ji_vals, i_vals)
     end
 
-    results_lock = ReentrantLock()
     all_indexes = NTuple{3,Int16}[]
-    all_vals    = Cdouble[]
+    all_vals = Cdouble[]
+    results_lock = ReentrantLock()
 
-    allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
-    GaussianBasis.workerpool(allocate, 1:BS2.nshells;
-                             chunksize=1, ntasks=ntasks) do k, buf
+    allocate(body) = body(zeros(Cdouble, Nmax1 * Nmax2 * Nmax3))
+
+    GaussianBasis.workerpool(allocate, 1:BS3.nshells;
+        chunksize=1, ntasks=ntasks) do k, buf
+
         local_idx = NTuple{3,Int16}[]
         local_val = Cdouble[]
-        @inbounds begin
-            Nk = Nvals2[k]
-            koff = ao_offset2[k]
-            K = (koff+1):(koff+Nk)
-            i_vals = ki_vals[k]
-            for ip = 1:length(i_vals)
-                i = i_vals[ip]
-                for jp = ip:length(i_vals)
-                    j = i_vals[jp]
-                    Ni = Nvals1[i]
-                    Nj = Nvals1[j]
-                    ioff = ao_offset1[i]
-                    joff = ao_offset1[j]
-                    I = (ioff+1):(ioff+Ni)
-                    J = (joff+1):(joff+Nj)
 
-                    generate_V_triple!(buf, BS1.basis[i], BS1.basis[j], BS2.basis[k])
+        Nk = Nvals3[k]
+        koff = ao_offset3[k]
 
-                    if maximum(abs, buf) > cutoff
-                        for (ni, nI) in enumerate(I), (nj, nJ) in enumerate(J)
-                            if nI <= nJ
-                                for (nk, nK) in enumerate(K)
-                                    nijk = Ni * Nj * (nk - 1) + Ni * (nj - 1) + ni
-                                    val = buf[nijk]
-                                    if abs(val) > cutoff
-                                        push!(local_idx, (nI, nJ, nK))
-                                        push!(local_val, val)
-                                        if nI < nJ
-                                            push!(local_idx, (nJ, nI, nK))
-                                            push!(local_val, val)
-                                        end
-                                    end
+        for j = 1:BS2.nshells
+            Nj = Nvals2[j]
+            joff = ao_offset2[j]
+
+            i_list = ji_vals[j]
+            for i in i_list
+                Ni = Nvals1[i]
+                ioff = ao_offset1[i]
+
+                generate_V_triple!(buf, BS1.basis[i], BS2.basis[j], BS3.basis[k])
+
+                if maximum(abs, buf) > cutoff
+                    idx = 1
+                    for nk in 1:Nk
+                        nK = koff + nk
+                        for nj in 1:Nj
+                            nJ = joff + nj
+                            for ni in 1:Ni
+                                nI = ioff + ni
+                                val = buf[idx]
+                                if abs(val) > cutoff
+                                    push!(local_idx, (nI, nJ, nK))
+                                    push!(local_val, val)
                                 end
+                                idx += 1
                             end
                         end
                     end
@@ -97,6 +99,53 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12;
     return all_indexes, all_vals
 end
 
+function EPI_1e3c(BS1::BasisSet, BS2::BasisSet, BS3::BasisSet)
+    out = zeros(BS1.nbas, BS2.nbas, BS3.nbas)
+    EPI_1e3c!(out, BS1, BS2, BS3)
+end
+
+function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet, BS3::BasisSet;
+				   ntasks=Threads.nthreads())
+    Nvals1 = num_basis.(BS1.basis)
+    Nvals2 = num_basis.(BS2.basis)
+    Nvals3 = num_basis.(BS3.basis)
+    Nmax1 = maximum(Nvals1)
+    Nmax2 = maximum(Nvals2)
+    Nmax3 = maximum(Nvals3)
+
+    ao_offset1 = cumsum([0; Nvals1[1:end-1]])
+    ao_offset2 = cumsum([0; Nvals2[1:end-1]])
+    ao_offset3 = cumsum([0; Nvals3[1:end-1]])
+
+	allocate(body) = body(zeros(Cdouble, Nmax1 * Nmax2 * Nmax3))
+    GaussianBasis.workerpool(allocate, 1:BS3.nshells;
+        chunksize=1, ntasks=ntasks) do k, buf
+        @inbounds begin
+            Nk = Nvals3[k]
+            koff = ao_offset3[k]
+            K = (koff+1):(koff+Nk)
+            for j in 1:BS2.nshells
+                Nj = Nvals2[j]
+                joff = ao_offset2[j]
+                J = (joff+1):(joff+Nj)
+                for i = 1:BS1.nshells
+                    Ni = Nvals1[i]
+                    ioff = ao_offset1[i]
+                    I = (ioff+1):(ioff+Ni)
+                    Nijk = Ni * Nj * Nk
+
+                    generate_V_triple!(buf, BS1.basis[i], BS2.basis[j], BS3.basis[k])
+
+                    vals = reshape(view(buf, 1:Nijk), Ni, Nj, Nk)
+                    out[I, J, K] = vals
+                end
+            end
+        end
+    end
+
+    return out
+end
+
 function EPI_1e3c(BS1::BasisSet, BS2::BasisSet)
     out = zeros(BS1.nbas, BS1.nbas, BS2.nbas)
     EPI_1e3c!(out, BS1, BS2)
@@ -109,8 +158,8 @@ function EPI_1e3c!(out, BS1::BasisSet, BS2::BasisSet;
     Nmax1 = maximum(Nvals1)
     Nmax2 = maximum(Nvals2)
 
-    ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
-    ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
+    ao_offset1 = cumsum([0; Nvals1[1:end-1]])
+    ao_offset2 = cumsum([0; Nvals2[1:end-1]])
 
     allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
     GaussianBasis.workerpool(allocate, 1:BS2.nshells;
@@ -151,7 +200,7 @@ end
 function EPI_1e3c!(out, BS::BasisSet)
     Nvals = num_basis.(BS.basis)
     Nmax = maximum(Nvals)
-    ao_offset = [sum(Nvals[1:(i-1)]) for i = 1:BS.nshells]
+    ao_offset = cumsum([0; Nvals[1:end-1]])
     ijk = find_unique_ijk(BS.nshells)
 
     allocate(body) = body(zeros(Cdouble, Nmax^3))
