@@ -1,10 +1,11 @@
 function nlist2graph_cut(bs_name, nlist, sys, klist; 
                          ρcuts=1:0.2:nlist.cutoff, 
                          cutoff=1e-6)
+    # for each distinct chemical species in the system,
     # generate a GTO basis centered at 0 
-    # and the corresponding coefficient matrix, 
+    # the coefficient matrix and cartisan S matrix , 
     # used to transform the Cartesian GTO into spherical GTO, 
-    # for each distinct chemical species in the system
+    # the onsite T, S, V matrices
     bs_list = Dict{ChemicalSpecies,BasisSet}()
     cart2sph_list = Dict{ChemicalSpecies,Matrix{Float64}}()
     Scart_list = Dict{ChemicalSpecies,Matrix{Float64}}()
@@ -175,7 +176,7 @@ function nlist2graph_cut(bs_name, nlist, sys, klist;
     end
     edge_V_data = edge_3c_data()
     
-    #klist_phys = physical_k.(Ref(sys), klist)
+    klist_phys = physical_k.(Ref(sys), klist)
 
     G = EquivariantTensors.ETGraph(
         ii, jj;
@@ -185,7 +186,7 @@ function nlist2graph_cut(bs_name, nlist, sys, klist;
         	V_off = edge_V_data,
 		),
         graph_data=(
-            #klist=klist_phys,
+            klist=klist_phys,
             T_on=T_on,
             V_on=V_on,
             S_on=S_on,
