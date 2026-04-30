@@ -17,22 +17,18 @@ import EquivariantTensors as ET
 # ---------------------------------------------------------------------------
 @inline getidx(v, i) = (i <= length(v)) ? v[i] : 0
 
-# ---------------------------------------------------------------------------
-# ACEEdgeEmbed
-#
-# Container for the radial (Rnl) and angular (Ylm) edge embeddings.
-# Returns a 2-tuple: (Rnl_3, Ylm_3)
-# ---------------------------------------------------------------------------
-struct ACEEdgeEmbed{TR, TY} <: Lux.AbstractLuxContainerLayer{(:Rnl, :Ylm)}
-    Rnl::TR
-    Ylm::TY
-end
+# this is not needed anymore, we can just use a `Parallel` layer
+# 
+# function simple_rembed(Dtot)  
+#    rbasis = P4ML.legendre_basis(Dtot+1)
+#    Rn_spec = P4ML.natural_indices(rbasis) 
+#    Rembed = ET.EdgeEmbed( ET.EmbedDP( 
+#                      ET.dp_transform( x -> 1 / (1 + norm(x.𝐫)) ), 
+#                      rbasis ) )
+#    return Rembed, Rn_spec
+# end
 
-function LuxCore.apply(l::ACEEdgeEmbed, G, ps, st)
-    Rnl_3, st_R = LuxCore.apply(l.Rnl, G, ps.Rnl, st.Rnl)
-    Ylm_3, st_Y = LuxCore.apply(l.Ylm, G, ps.Ylm, st.Ylm)
-    return (Rnl_3, Ylm_3), (Rnl = st_R, Ylm = st_Y)
-end
+
 
 # ---------------------------------------------------------------------------
 # ace_make_embed
@@ -59,24 +55,23 @@ function ace_make_embed(rcut; Dtot::Int = 9, maxl::Int = 5)
     # generate the radial transform 
     trans_r = ET.dp_transform( (x, st) -> 1 / (1 + norm(x.𝐫) / st.rcut), 
                             (;rcut = rcut_ang) )
-    
-    rbasis = Lux.Chain(
-        trans = trans_r, 
-        post = Lux.SkipConnection(
-            polys,
-            Lux.WrappedFunction(PY -> env.(PY[2]) .* PY[1])
-        )
-    )    
-    Rnl_embed = EquivariantTensors.EdgeEmbed(rbasis)
 
-    ybasis = Lux.Chain(
-        trans = ET.dp_transform((x, st) -> x.𝐫, NamedTuple()), 
-        basis = ybas
-    )
-    Ylm_embed = EquivariantTensors.EdgeEmbed(ybasis)
+    # the polynomial basis just stays the same 
+    # but needs to be wrapped due to the envelope being applied 
+    # wrapped_basis makes the Lux layer behave like a P4ML basis 
+    env_polys = P4ML.wrapped_basis( BranchLayer(
+            polys,   # y -> P
+            WrappedFunction( y -> env.(y) ),  # y -> fₑₙᵥ
+            fusion = WrappedFunction( Pe -> Pe[2] .* Pe[1] )
+         ) )
 
-    embed = ACEEdgeEmbed(Rnl_embed, Ylm_embed)
-    return embed, Rnl_spec, Ylm_spec
+    Rnl_embed = EquivariantTensors.EdgeEmbed( ET.EmbedDP( 
+            trans_r, env_polys ) ) 
+
+    Ylm_embed = ET.EdgeEmbed( ET.EmbedDP( 
+            ET.dp_transform( x -> x.𝐫 ), ybas ) )
+
+    return Parallel(nothing; Rnl = Rnl_embed, Ylm = Ylm_embed), Rnl_spec, Ylm_spec    
 end
 # ---------------------------------------------------------------------------
 # ace_make_mbspec

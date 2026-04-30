@@ -11,8 +11,11 @@ using Random
 using Lux
 import LuxCore
 using StaticArrays
+using Zygote
+using LinearAlgebra
 
 import EquivariantTensors as ET 
+import EquivariantTensors: PState, VState
 
 # using CUDA
 # dev = CUDADevice()
@@ -38,7 +41,7 @@ nlist = PairList(sys, rcut)
 
 ##
 # ---------------------------------------------------------------------------
-# 2. Construct atomic basis
+# Construct input graph 
 # ---------------------------------------------------------------------------
 
 X = position(sys, :)
@@ -50,94 +53,56 @@ atoms = [
     Molecules.Atom(14, 0.0, X_ang[2]),   # Si atom 2
 ]
 
-# Construct Gaussian atomic orbital basis set
-# bs = BasisSet("def2-TZVP", atoms; spherical=true, lib=:acsint)
-bs = BasisSet("STO-3g", atoms; spherical=true, lib=:acsint)
-
-##
-# ---------------------------------------------------------------------------
-# 3. ACE-based 3-center model
-# ---------------------------------------------------------------------------
-
-rng = MersenneTwister(1234)
-
-# Number of target orbitals per atom (compressed basis size)
-NORB = 4
-
-# Build equivariant ACE-based 3-center model
-# - Dtot: radial polynomial order
-# - maxl: maximum angular momentum
-# - ORD : many-body expansion order
-model = acev_3c_model(bs, NORB, rcut;
-    Dtot = 5,
-    maxl = 5,
-    ORD  = 3,
-    rng = rng,
-)
-
-ps, st = LuxCore.setup(rng, model)
-
-##
-# ---------------------------------------------------------------------------
-# 4. Build graph input G
-# ---------------------------------------------------------------------------
-
 # Define k-point list
 klist = [
     SVector(0.0, 0.0, 0.0),
 ]
 
+bs = BasisSet("STO-3g", atoms; spherical=true, lib=:acsint)
+
 # Build graph
 G = nlist2graph(bs, nlist, sys, klist)
 
-##
-
-# @profview let bs = bs, nlist = nlist, sys = sys, klist = klist 
-#    for _ = 1:20 
-#       G = nlist2graph(bs, nlist, sys, klist)
-#    end
-# end
-
-##
-# ---------------------------------------------------------------------------
-# 5. Forward pass: evaluate model
-# ---------------------------------------------------------------------------
-
-# Run model to obtain:
-# - λ    : eigenvalues (band energies)
-# - H : Hamiltonian matrices (k-dependent)
-# - S : overlap matrices
-# - Wb   : AO → compressed orbital transformation matrix
-out, st = model(G, ps, st)
-
-##
-
-e1 = [ (R_cell = e.R_cell, 𝐫 = e.𝐫, z0 = e.z0, z1 = e.z1) 
+# remove basis data from the graph 
+e1 = [ PState(R_cell = e.R_cell, 𝐫 = e.𝐫, z0 = e.z0, z1 = e.z1) 
        for e in G.edge_data ]
 G1 = ET.ETGraph(G.ii, G.jj, G.first, G.node_data, e1, G.graph_data, G.maxneigs)
 
 G_gpu = dev(ET.float32(G1))
 
-# out, st = model(G_gpu, ps_gpu, st_gpu)
+##
 
 _, n_channels = RealMLTB.lmax_and_nchannels_per_atom(bs)
-model_ace, ps_ace, st_ace = RealMLTB.build_ace_equivariant_model(n_channels, rcut)
+model, ps, st = RealMLTB.build_ace_equivariant_model(n_channels, rcut)
 
-ps_ace_gpu = dev(ps_ace)
-st_ace_gpu = dev(st_ace)
+ps_gpu = dev(ET.float32(ps))
+st_gpu = dev(ET.float32(st))
+
+out, _ = model(G1, ps, st)
+out_gpu, _ = model(G_gpu, ps_gpu, st_gpu)
+
+@show max(norm.(Array.(out_gpu) .- out)...)
 
 ##
 
-out_ace, _ = model_ace(G_gpu, ps_ace_gpu, st_ace_gpu)
+# changing the pullback test to a setting I'm a bit more 
+# familiar with - compute a scalar, then take the gradient. For some reasons 
+# this made it easier to read the stack and find the bug. 
 
-using Zygote
+function myscalar(model, G, ps, st) 
+    out, _ = model(G, ps, st)
+    return sum(out[1].^2) + sum(abs2, sum(out[2]))
+end
 
-out, pb = Zygote.pullback(ps -> model_ace(G, ps, st_ace), ps_ace)
-grads = pb(out) # works on CPU
+val = myscalar(model, G1, ps, st)
+val_gpu = myscalar(model, G_gpu, ps_gpu, st_gpu)
+@show val ≈ val_gpu
 
-out, pb = Zygote.pullback(ps -> model_ace(G_gpu, ps, st_ace_gpu), ps_ace_gpu)
-grads = pb(out)
-# ERROR: Scalar indexing is disallowed.
-# pullback!(∂X::Vector{…}, ∂P::CuArray{…}, basis::Polynomials4ML.RealSCWrapper{…}, X::CuArray{…}; dP::CuArray{…})
-# @ Polynomials4ML ~/.julia/packages/Polynomials4ML/XDA09/src/generic_ad.jl:31
+g = Zygote.gradient(_ps -> myscalar(model, G1, _ps, st), ps)[1]
+g_gpu = Zygote.gradient(_ps -> myscalar(model, G_gpu, _ps, st_gpu), ps_gpu)[1]
 
+
+@show g.ace.WLL[1] ≈ Array(g_gpu.ace.WLL[1])
+@show norm(g.ace.WLL[2] - Array(g_gpu.ace.WLL[2]))
+
+# remaining issue to understand: why is g.WLL[2] ≈ 0 ??? 
