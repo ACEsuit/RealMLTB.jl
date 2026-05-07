@@ -99,6 +99,88 @@ function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, BS3::BasisSet,
     return all_indexes, all_vals
 end
 
+function sparseEPI_1e3c(BS1::BasisSet, BS2::BasisSet, cutoff=1e-12;
+                        ntasks=Threads.nthreads())
+    Nvals1 = num_basis.(BS1.basis)
+    Nvals2 = num_basis.(BS2.basis)
+
+    Nmax1 = maximum(Nvals1)
+    Nmax2 = maximum(Nvals2)
+
+    ao_offset1 = [sum(Nvals1[1:(i-1)]) for i = 1:BS1.nshells]
+    ao_offset2 = [sum(Nvals2[1:(i-1)]) for i = 1:BS2.nshells]
+
+    tmp = zeros(Cdouble, Nmax1 * Nmax2)
+    ki_vals = Vector{Int16}[]
+    for (s2, bs2) in enumerate(BS2.basis)
+        i_vals = Int16[]
+        for (s1, bs1) in enumerate(BS1.basis)
+            generate_S2_pair!(tmp, bs1, bs2)
+            if √maximum(tmp) > cutoff
+                push!(i_vals, s1)
+            end
+        end
+        push!(ki_vals, i_vals)
+    end
+
+    results_lock = ReentrantLock()
+    all_indexes = NTuple{3,Int16}[]
+    all_vals    = Cdouble[]
+
+    allocate(body) = body(zeros(Cdouble, Nmax1^2 * Nmax2))
+    GaussianBasis.workerpool(allocate, 1:BS2.nshells;
+        chunksize=1, ntasks=ntasks) do k, buf
+
+        local_idx = NTuple{3,Int16}[]
+        local_val = Cdouble[]
+        @inbounds begin
+            Nk = Nvals2[k]
+            koff = ao_offset2[k]
+            K = (koff+1):(koff+Nk)
+            i_vals = ki_vals[k]
+            for ip = 1:length(i_vals)
+                i = i_vals[ip]
+                for jp = ip:length(i_vals)
+                    j = i_vals[jp]
+                    Ni = Nvals1[i]
+                    Nj = Nvals1[j]
+                    ioff = ao_offset1[i]
+                    joff = ao_offset1[j]
+                    I = (ioff+1):(ioff+Ni)
+                    J = (joff+1):(joff+Nj)
+
+                    generate_V_triple!(buf, BS1.basis[i], BS1.basis[j], BS2.basis[k])
+
+                    if maximum(abs, buf) > cutoff
+                        for (ni, nI) in enumerate(I), (nj, nJ) in enumerate(J)
+                            if nI <= nJ
+                                for (nk, nK) in enumerate(K)
+                                    nijk = Ni * Nj * (nk - 1) + Ni * (nj - 1) + ni
+                                    val = buf[nijk]
+                                    if abs(val) > cutoff
+                                        push!(local_idx, (nI, nJ, nK))
+                                        push!(local_val, val)
+                                        if nI < nJ
+                                            push!(local_idx, (nJ, nI, nK))
+                                            push!(local_val, val)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        lock(results_lock) do
+            append!(all_indexes, local_idx)
+            append!(all_vals, local_val)
+        end
+    end
+
+    return all_indexes, all_vals
+end
+
 function EPI_1e3c(BS1::BasisSet, BS2::BasisSet, BS3::BasisSet)
     out = zeros(BS1.nbas, BS2.nbas, BS3.nbas)
     EPI_1e3c!(out, BS1, BS2, BS3)
