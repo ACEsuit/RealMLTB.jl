@@ -65,7 +65,13 @@ function transfer_component_weights(tensor_small, W_small, tensor_large, W_large
     specs_small = get_nnll_spec(tensor_small)
     specs_large = get_nnll_spec(tensor_large)
 
-    W_large_new = [zeros(eltype(w), size(w)) for w in W_large_template]
+    # Preserve the storage backend of W_large_template.
+    # If W_large_template is on GPU, similar(w) also allocates on GPU.
+    W_large_new = map(W_large_template) do w
+        z = similar(w)
+        fill!(z, zero(eltype(z)))
+        z
+    end
 
     for k in eachindex(specs_large)
         small_lookup = Dict{Vector{NT_NL_SPEC}, Int}()
@@ -229,7 +235,15 @@ function _print_ladder_summary(model_type, target_Dtot, target_maxl, target_ORD,
     end
 end
 
-function _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
+function _initialise_level(
+    model_builder,
+    bs,
+    NORB,
+    rcut,
+    cfg,
+    rng;
+    prepare_ps_st = (ps, st) -> (ps, st),
+)
     model = model_builder(
         bs,
         NORB,
@@ -241,6 +255,7 @@ function _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
     )
 
     ps_init, st_init = LuxCore.setup(rng, model)
+    ps_init, st_init = prepare_ps_st(ps_init, st_init)
 
     return model, ps_init, st_init
 end
@@ -422,6 +437,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     kweights = nothing,
     filter = nothing,
     H_iterations::Int = 500,
+    prepare_ps_st = (ps, st) -> (ps, st),
 )
     rng = MersenneTwister()
     ladder = generate_ladder(target_Dtot, target_maxl, target_ORD)
@@ -456,7 +472,15 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
         verbose && println("\n>>> [Level $i/$n_levels] Dtot=$(cfg.Dtot) maxl=$(cfg.maxl) ORD=$(cfg.ORD)")
 
         current_model, ps_init, st_init =
-            _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
+            _initialise_level(
+                model_builder,
+                bs,
+                NORB,
+                rcut,
+                cfg,
+                rng;
+                prepare_ps_st = prepare_ps_st,
+            )
 
         current_ps, current_st = _prepare_level_parameters(
             i,
@@ -544,6 +568,7 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     filter_σ::Float64 = 0.5,
     verbose::Bool = true,
     embed_func = nothing,
+    prepare_ps_st = (ps, st) -> (ps, st),
 
     # New:
     #   :all
@@ -582,7 +607,15 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
         verbose && println("\n>>> [Level $i/$n_levels] Dtot=$(cfg.Dtot) maxl=$(cfg.maxl) ORD=$(cfg.ORD)")
 
         current_model, ps_init, st_init =
-            _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
+            _initialise_level(
+                model_builder,
+                bs,
+                NORB,
+                rcut,
+                cfg,
+                rng;
+                prepare_ps_st = prepare_ps_st,
+            )
 
         current_ps, current_st = _prepare_level_parameters(
             i,

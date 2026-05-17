@@ -7,13 +7,16 @@ using Zygote
 using ChainRulesCore
 using ChainRulesCore: NoTangent
 
+include("utils/backend.jl")
 include("utils/etgraph_builder.jl")
 include("utils/etgraph_cut_builder.jl")
 
 export EdgePayload,
        compute_pair_spherical_AO_integrals,
        nlist2graph,
-       nlist2graph_cut
+       nlist2graph_cut,
+       gpu_3center_graph,
+       strip_3center_graph_for_gpu
        
 include("utils/EffectivePot.jl")
 include("utils/spherical_integrals.jl")

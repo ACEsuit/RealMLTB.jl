@@ -527,6 +527,62 @@ function _replace_graph_data_preserve_storage(G_gpu, new_graph_data)
     return (Base.typename(typeof(G_gpu)).wrapper)(vals...)
 end
 
+
+function _replace_edge_data_preserve_storage(G, new_edge_data)
+    fns = fieldnames(typeof(G))
+
+    @assert :edge_data in fns
+
+    vals = ntuple(length(fns)) do k
+        f = fns[k]
+        if f === :edge_data
+            new_edge_data
+        else
+            getfield(G, f)
+        end
+    end
+
+    return (Base.typename(typeof(G)).wrapper)(vals...)
+end
+
+function strip_3center_edge_data(G)
+    edge_data = [
+        EquivariantTensors.PState(
+            R_cell = e.R_cell,
+            𝐫 = e.𝐫,
+            z0 = e.z0,
+            z1 = e.z1,
+        )
+        for e in G.edge_data
+    ]
+
+    return _replace_edge_data_preserve_storage(G, edge_data)
+end
+
+function strip_3center_graph_data(G)
+    return _replace_graph_data_preserve_storage(G, (; klist = G.graph_data.klist))
+end
+
+function strip_3center_graph_for_gpu(G)
+    return strip_3center_graph_data(strip_3center_edge_data(G))
+end
+
+"""
+    gpu_3center_graph(dev, G, NORB; T=Float32)
+
+Create the GPU graph used by the three-center Lux models.  The returned graph
+keeps only the ACE edge payload and k-point graph data on the ETGraph itself,
+then attaches a `ThreeCenterGPUCache` containing all three-center integral data
+that the GPU kernels need.  Build the cache from the original CPU graph once;
+subsequent forwards and pullbacks stay on GPU arrays.
+"""
+function gpu_3center_graph(dev, G, NORB::Int; T = Float32)
+    cache = make_3center_gpu_cache(G, NORB; T = T)
+    G_ace = strip_3center_graph_for_gpu(G)
+    G_gpu = dev(EquivariantTensors.float32(G_ace))
+    return attach_3center_gpu_cache(G_gpu, cache)
+end
+
 function attach_3center_gpu_cache(G_gpu, cache; field::Symbol = :threecenter_cache)
     new_graph_data = (
     klist = G_gpu.graph_data.klist,

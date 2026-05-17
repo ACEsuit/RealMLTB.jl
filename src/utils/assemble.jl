@@ -601,6 +601,288 @@ end
 using CUDA
 using GaussianBasis
 
+
+# ---------------------------------------------------------------------------
+# GPU path for cut_integrals graph
+# ---------------------------------------------------------------------------
+
+function _copy_H_block_kernel!(vH, Hblk, idx::Int, NORB::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * NORB
+
+    if q <= N
+        t = q - 1
+        b = (t % NORB) + 1
+        a = (t ÷ NORB) + 1
+        vH[a, b, idx] = Hblk[a, b]
+    end
+
+    return nothing
+end
+
+function _copy_S_block_kernel!(vS, Sblk, idx::Int, NORB::Int)
+    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    N = NORB * NORB
+
+    if q <= N
+        t = q - 1
+        b = (t % NORB) + 1
+        a = (t ÷ NORB) + 1
+        vS[a, b, idx] = Sblk[a, b]
+    end
+
+    return nothing
+end
+
+function _contract_v3(V3::CUDA.CuArray{<:Real,3}, Wvk::CUDA.CuArray{<:Real,1})
+    ni, nj, nk = size(V3)
+    @assert length(Wvk) == nk
+    return reshape(reshape(V3, ni * nj, nk) * Wvk, ni, nj)
+end
+
+function _contract_v3_dim2(V3::CUDA.CuArray{<:Real,3}, Wvp::CUDA.CuArray{<:Real,1})
+    ni, np, nj = size(V3)
+    @assert length(Wvp) == np
+
+    # V3[a,b,c] * Wvp[b] -> out[a,c]
+    # reshape(permutedims(V3, (1, 3, 2)), ni*nj, np) * Wvp
+    Vperm = permutedims(V3, (1, 3, 2))
+    return reshape(reshape(Vperm, ni * nj, np) * Wvp, ni, nj)
+end
+
+function _contract_v3_dim2_adjoint_wv(V3::CUDA.CuArray{<:Real,3}, ΔA::CUDA.CuArray{<:Real,2})
+    ni, np, nj = size(V3)
+    Vperm = permutedims(V3, (1, 3, 2))
+    return reshape(Vperm, ni * nj, np)' * vec(ΔA)
+end
+
+function _contract_v3_adjoint_wv(V3::CUDA.CuArray{<:Real,3}, ΔA::CUDA.CuArray{<:Real,2})
+    ni, nj, nk = size(V3)
+    return reshape(V3, ni * nj, nk)' * vec(ΔA)
+end
+
+function _3center_triplet_cut_gpu(G, basis::BasisSet,
+                                  Wv::CUDA.CuArray{<:Real,1},
+                                  Wb::CUDA.CuArray{<:Real,2})
+    cut = G.graph_data.cut_integrals
+
+    T_off = cut.T_off
+    S_off = cut.S_off
+    V_off = cut.V_off
+
+    atom_species = _cut_atom_species(G, basis)
+
+    NORB, nat, orb_ranges, ao_ranges = _cut_ranges(G, Wv, Wb)
+    TV = eltype(Wv)
+
+    nblocks = nat + length(T_off) + length(S_off) + length(V_off)
+
+    vH = CUDA.zeros(TV, NORB, NORB, nblocks)
+    vS = CUDA.zeros(TV, NORB, NORB, nblocks)
+
+    threads = 256
+    blocks = cld(NORB * NORB, threads)
+
+    # onsite
+    for i in 1:nat
+        rows_orb = orb_ranges[i]
+        rows_ao  = ao_ranges[i]
+
+        Zi = atom_species[i]
+
+        Wbi = Wb[rows_orb, rows_ao]
+        Wvi = Wv[rows_ao]
+
+        Hii, Sii = construct_integral(
+            Wvi,
+            Wbi,
+            G.graph_data.T_on[Zi],
+            G.graph_data.V_on[Zi],
+            G.graph_data.S_on[Zi],
+        )
+
+        @cuda threads=threads blocks=blocks _copy_H_block_kernel!(vH, Hii, i, NORB)
+        @cuda threads=threads blocks=blocks _copy_S_block_kernel!(vS, Sii, i, NORB)
+    end
+
+    offset = nat
+
+    # T offsite
+    for e in eachindex(T_off)
+        ed = T_off[e]
+
+        i, j = ed.integral_idx
+
+        ri, rj = orb_ranges[i], orb_ranges[j]
+        ai, aj = ao_ranges[i], ao_ranges[j]
+
+        Hij = Wb[ri, ai] * (ed.w .* ed.V2) * Wb[rj, aj]'
+
+        @cuda threads=threads blocks=blocks _copy_H_block_kernel!(vH, Hij, offset + e, NORB)
+    end
+
+    offset += length(T_off)
+
+    # S offsite
+    for e in eachindex(S_off)
+        ed = S_off[e]
+
+        i, j = ed.integral_idx
+
+        ri, rj = orb_ranges[i], orb_ranges[j]
+        ai, aj = ao_ranges[i], ao_ranges[j]
+
+        Sij = Wb[ri, ai] * (ed.w .* ed.V2) * Wb[rj, aj]'
+
+        @cuda threads=threads blocks=blocks _copy_S_block_kernel!(vS, Sij, offset + e, NORB)
+    end
+
+    offset += length(S_off)
+
+    # V offsite
+    for e in eachindex(V_off)
+        ed = V_off[e]
+
+        i, p, j = ed.integral_idx
+
+        ri, rj = orb_ranges[i], orb_ranges[j]
+        ai, ap, aj = ao_ranges[i], ao_ranges[p], ao_ranges[j]
+
+        Vij = _contract_v3_dim2(ed.V3, Wv[ap])
+        Hij = Wb[ri, ai] * (ed.w .* Vij) * Wb[rj, aj]'
+
+        @cuda threads=threads blocks=blocks _copy_H_block_kernel!(vH, Hij, offset + e, NORB)
+    end
+
+    return vH, vS
+end
+
+function _3center_triplet_cut_gpu_rrule(G, basis::BasisSet,
+                                        Wv::CUDA.CuArray{<:Real,1},
+                                        Wb::CUDA.CuArray{<:Real,2})
+    vH, vS = _3center_triplet_cut_gpu(G, basis, Wv, Wb)
+
+    cut = G.graph_data.cut_integrals
+
+    T_off = cut.T_off
+    S_off = cut.S_off
+    V_off = cut.V_off
+
+    atom_species = _cut_atom_species(G, basis)
+
+    NORB, nat, orb_ranges, ao_ranges = _cut_ranges(G, Wv, Wb)
+
+    function pullback_cut_gpu(ΔΩ)
+        ΔvH = unthunk(ΔΩ[1])
+        ΔvS = unthunk(ΔΩ[2])
+
+        TΔ = eltype(ΔvH)
+
+        Wv̄ = CUDA.zeros(TΔ, size(Wv))
+        Wb̄ = CUDA.zeros(TΔ, size(Wb))
+
+        # onsite adjoints
+        for i in 1:nat
+            ro = orb_ranges[i]
+            ao = ao_ranges[i]
+
+            Zi = atom_species[i]
+
+            Wbi = Wb[ro, ao]
+            Wvi = Wv[ao]
+
+            Tm = G.graph_data.T_on[Zi]
+            Vm = G.graph_data.V_on[Zi]
+            Sm = G.graph_data.S_on[Zi]
+
+            Vpair = _contract_v3(Vm, Wvi)
+            A = Tm + Vpair
+
+            ΔH = copy(@view ΔvH[:, :, i])
+            ΔS = copy(@view ΔvS[:, :, i])
+
+            @views Wb̄[ro, ao] .+= real.(
+                ΔH * Wbi * A' +
+                ΔH' * Wbi * A +
+                ΔS * Wbi * Sm' +
+                ΔS' * Wbi * Sm
+            )
+
+            ΔA = real.(Wbi' * ΔH * Wbi)
+            @views Wv̄[ao] .+= real.(_contract_v3_adjoint_wv(Vm, ΔA))
+        end
+
+        # T_off adjoints
+        offset = nat
+
+        for e in eachindex(T_off)
+            ed = T_off[e]
+
+            i, j = ed.integral_idx
+
+            ri, rj = orb_ranges[i], orb_ranges[j]
+            ai, aj = ao_ranges[i], ao_ranges[j]
+
+            Wbi, Wbj = Wb[ri, ai], Wb[rj, aj]
+
+            A = ed.w .* ed.V2
+            ΔH = copy(@view ΔvH[:, :, offset + e])
+
+            @views Wb̄[ri, ai] .+= real.(ΔH * Wbj * A')
+            @views Wb̄[rj, aj] .+= real.(ΔH' * Wbi * A)
+        end
+
+        # S_off adjoints
+        offset += length(T_off)
+
+        for e in eachindex(S_off)
+            ed = S_off[e]
+
+            i, j = ed.integral_idx
+
+            ri, rj = orb_ranges[i], orb_ranges[j]
+            ai, aj = ao_ranges[i], ao_ranges[j]
+
+            Wbi, Wbj = Wb[ri, ai], Wb[rj, aj]
+
+            A = ed.w .* ed.V2
+            ΔS = copy(@view ΔvS[:, :, offset + e])
+
+            @views Wb̄[ri, ai] .+= real.(ΔS * Wbj * A')
+            @views Wb̄[rj, aj] .+= real.(ΔS' * Wbi * A)
+        end
+
+        # V_off adjoints
+        offset += length(S_off)
+
+        for e in eachindex(V_off)
+            ed = V_off[e]
+
+            i, p, j = ed.integral_idx
+
+            ri, rj = orb_ranges[i], orb_ranges[j]
+            ai, ap, aj = ao_ranges[i], ao_ranges[p], ao_ranges[j]
+
+            Wbi, Wbj = Wb[ri, ai], Wb[rj, aj]
+
+            V3 = ed.V3
+
+            A = ed.w .* _contract_v3_dim2(V3, Wv[ap])
+            ΔH = copy(@view ΔvH[:, :, offset + e])
+
+            @views Wb̄[ri, ai] .+= real.(ΔH * Wbj * A')
+            @views Wb̄[rj, aj] .+= real.(ΔH' * Wbi * A)
+
+            ΔA = real.(Wbi' * ΔH * Wbj) .* ed.w
+            @views Wv̄[ap] .+= real.(_contract_v3_dim2_adjoint_wv(V3, ΔA))
+        end
+
+        return NoTangent(), NoTangent(), NoTangent(), Wv̄, Wb̄
+    end
+
+    return (vH, vS), pullback_cut_gpu
+end
+
 function _copy_siteblock_kernel!(
     vH,
     vS,
@@ -636,6 +918,10 @@ function _3center_triplet(
     Wv::CUDA.CuArray{<:Real,1},
     Wb::CUDA.CuArray{<:Real,2},
 )
+    if _is_cut_graph(G)
+        return _3center_triplet_cut_gpu(G, basis, Wv, Wb)
+    end
+
     cache = G.graph_data.threecenter_cache
 
     ii = cache.ii
@@ -747,6 +1033,10 @@ function ChainRulesCore.rrule(
     Wv::CUDA.CuArray{<:Real,1},
     Wb::CUDA.CuArray{<:Real,2},
 )
+    if _is_cut_graph(G)
+        return _3center_triplet_cut_gpu_rrule(G, basis, Wv, Wb)
+    end
+
     cache = G.graph_data.threecenter_cache
 
     ii = cache.ii
@@ -1055,4 +1345,206 @@ function ChainRulesCore.rrule(
     end
 
     return (λlist, Vlist), pullback_generate_λ_and_vecs
+end
+
+
+# ============================================================================
+# Full CUDA generalized eigenproblem rrule override
+# ============================================================================
+
+# eigen_full_rrule_patch.jl
+#
+# Paste this block near the end of src/utils/assemble.jl, replacing the old
+# CUDA rrule for generate_λ_and_vecs(Hout::CuArray, Sout::CuArray).
+#
+# Purpose:
+#   Handle gradients through both λlist and Vlist.
+#
+# Assumptions:
+#   - Hermitian generalized eigenproblem H v = λ S v.
+#   - Eigenvectors are S-normalized: V' * S * V = I.
+#   - Eigenvalues are locally non-degenerate.  Near degeneracies, eigenvector
+#     gradients are ill-conditioned by construction.
+
+using CUDA
+using LinearAlgebra
+using ChainRulesCore
+using ChainRulesCore: NoTangent, ZeroTangent, unthunk
+
+_eig_to_cu(x) = x isa CUDA.CuArray ? x : CUDA.cu(x)
+
+_eig_is_zero_tangent(x) =
+    x === nothing || x isa NoTangent || x isa ZeroTangent
+
+function _eig_zero_like(A)
+    return CUDA.zeros(eltype(A), size(A))
+end
+
+function _eig_eye(::Type{T}, n::Integer) where {T}
+    return CUDA.CuArray(Matrix{T}(I, n, n))
+end
+
+function _eig_λbar(Δλk, λk)
+    if _eig_is_zero_tangent(Δλk)
+        return CUDA.zeros(eltype(real.(λk)), length(λk))
+    else
+        return _eig_to_cu(real.(Δλk))
+    end
+end
+
+function _eig_Vbar(ΔVk, Vk)
+    if _eig_is_zero_tangent(ΔVk)
+        return CUDA.zeros(eltype(Vk), size(Vk))
+    else
+        return _eig_to_cu(ΔVk)
+    end
+end
+
+"""
+    _generalized_eigen_pullback_one_k_full(λ, V, Δλ, ΔV, H, S)
+
+Adjoint of the Hermitian generalized eigensolver
+
+    H V = S V Diagonal(λ),     V' S V = I
+
+with respect to H and S.
+
+This includes both eigenvalue and eigenvector upstream sensitivities.
+"""
+function _generalized_eigen_pullback_one_k_full(λk, Vk, Δλk, ΔVk, Hk, Sk)
+    λ = _eig_to_cu(real.(λk))
+    V = _eig_to_cu(Vk)
+
+    n = length(λ)
+
+    λbar = _eig_λbar(Δλk, λ)
+    Vbar = _eig_Vbar(ΔVk, V)
+
+    Tλ = eltype(λ)
+    TC = eltype(Hk)
+
+    eye = _eig_eye(Tλ, n)
+    offmask = one(Tλ) .- eye
+
+    # M_ij = v_i' * ∂L/∂v_j in the Euclidean pairing.
+    M = V' * Vbar
+
+    # Denominator for eigenvector derivative:
+    #   K_ij = (E_ij - λ_j F_ij) / (λ_j - λ_i), i != j
+    λrow = reshape(λ, 1, n)   # λ_j
+    λcol = reshape(λ, n, 1)   # λ_i
+
+    denom = λrow .- λcol
+
+    # Avoid NaN on diagonal; diagonal is removed by offmask.
+    denom_safe = denom .+ eye
+
+    C = (M ./ denom_safe) .* offmask
+
+    # Contributions from eigenvalues:
+    #   dλ_i = v_i' (dH - λ_i dS) v_i
+    Ebar = complex.(eye .* reshape(λbar, n, 1))
+    Fbar = -complex.(eye .* reshape(λ .* λbar, n, 1))
+
+    # Contributions from eigenvectors:
+    #   off-diagonal: K_ij = (E_ij - λ_j F_ij)/(λ_j - λ_i)
+    Ebar .+= C
+    Fbar .-= complex.(λrow) .* C
+
+    # Diagonal normalization term:
+    #   K_ii = -1/2 F_ii
+    # This fixes the S-normalization part of the eigenvector derivative.
+    Fbar .-= complex(Tλ(0.5)) .* (eye .* M)
+
+    # Since H and S are Hermitian, return Hermitian adjoints.
+    Ebar = (Ebar .+ Ebar') ./ 2
+    Fbar = (Fbar .+ Fbar') ./ 2
+
+    Hbar = V * Ebar * V'
+    Sbar = V * Fbar * V'
+
+    return TC.(Hbar), TC.(Sbar)
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(generate_λ_and_vecs),
+    Hout::CUDA.CuArray{T,3},
+    Sout::CUDA.CuArray{T,3},
+) where {T <: Complex}
+
+    λlist, Vlist = generate_λ_and_vecs(Hout, Sout)
+
+    function pullback_generate_λ_and_vecs_full(ΔΩ)
+        Δλ_raw = unthunk(ΔΩ[1])
+        ΔV_raw = unthunk(ΔΩ[2])
+
+        Hbar = _eig_zero_like(Hout)
+        Sbar = _eig_zero_like(Sout)
+
+        nk = size(Hout, 3)
+
+        for ik in 1:nk
+            Δλk =
+                _eig_is_zero_tangent(Δλ_raw) ? NoTangent() : Δλ_raw[ik]
+
+            ΔVk =
+                _eig_is_zero_tangent(ΔV_raw) ? NoTangent() : ΔV_raw[ik]
+
+            if _eig_is_zero_tangent(Δλk) && _eig_is_zero_tangent(ΔVk)
+                continue
+            end
+
+            Hk = copy(@view Hout[:, :, ik])
+            Sk = copy(@view Sout[:, :, ik])
+
+            Hbar_k, Sbar_k = _generalized_eigen_pullback_one_k_full(
+                λlist[ik],
+                Vlist[ik],
+                Δλk,
+                ΔVk,
+                Hk,
+                Sk,
+            )
+
+            @views begin
+                Hbar[:, :, ik] .= Hbar_k
+                Sbar[:, :, ik] .= Sbar_k
+            end
+        end
+
+        return NoTangent(), Hbar, Sbar
+    end
+
+    return (λlist, Vlist), pullback_generate_λ_and_vecs_full
+end
+
+function ChainRulesCore.rrule(
+    ::typeof(generate_λ_and_vecs),
+    H::CUDA.CuArray{T,2},
+    S::CUDA.CuArray{T,2},
+) where {T <: Complex}
+
+    λ, V = generate_λ_and_vecs(H, S)
+
+    function pullback_generate_λ_and_vecs_one_full(ΔΩ)
+        Δλ = unthunk(ΔΩ[1])
+        ΔV = unthunk(ΔΩ[2])
+
+        if _eig_is_zero_tangent(Δλ) && _eig_is_zero_tangent(ΔV)
+            return NoTangent(), _eig_zero_like(H), _eig_zero_like(S)
+        end
+
+        Hbar, Sbar = _generalized_eigen_pullback_one_k_full(
+            λ,
+            V,
+            Δλ,
+            ΔV,
+            H,
+            S,
+        )
+
+        return NoTangent(), Hbar, Sbar
+    end
+
+    return (λ, V), pullback_generate_λ_and_vecs_one_full
 end

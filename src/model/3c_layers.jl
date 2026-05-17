@@ -19,9 +19,10 @@ using Random
 using Lux
 import LuxCore
 using EquivariantTensors
+using GaussianBasis: BasisSet
 
 export Simple3Center, ACEv3Center, ACE3CenterCaseA, ACE3CenterCaseB
-export update_basisset
+export update_basisset, gpu_3center_params, gpu_3center_state
 
 # ---------------------------------------------------------------------------
 # Helper: broadcast a per-atom Wb_atom (NORB × Nb) to the full system
@@ -124,6 +125,69 @@ function ChainRulesCore.rrule(
     return Wb, pullback_kron_I_atoms
 end
 
+
+_to_gpu_float32_preserve_basis(dev, x::Nothing) = nothing
+_to_gpu_float32_preserve_basis(dev, x::BasisSet) = x
+_to_gpu_float32_preserve_basis(dev, x::Bool) = x
+_to_gpu_float32_preserve_basis(dev, x::Integer) = x
+_to_gpu_float32_preserve_basis(dev, x::AbstractFloat) = Float32(x)
+_to_gpu_float32_preserve_basis(dev, x::Complex) = ComplexF32(x)
+_to_gpu_float32_preserve_basis(dev, x::Symbol) = x
+_to_gpu_float32_preserve_basis(dev, x::AbstractString) = x
+
+# Keep StaticArrays as StaticArrays. They are small structural constants/states,
+# and converting them to CuArray often breaks code expecting SMatrix/SVector.
+function _to_gpu_float32_preserve_basis(dev, x::StaticArrays.StaticArray)
+    if eltype(x) <: Complex
+        return ComplexF32.(x)
+    elseif eltype(x) <: AbstractFloat
+        return Float32.(x)
+    else
+        return x
+    end
+end
+
+# Ordinary numeric arrays should live on the GPU.
+function _to_gpu_float32_preserve_basis(dev, x::AbstractArray{<:Number})
+    if eltype(x) <: Complex
+        return dev(ComplexF32.(x))
+    elseif eltype(x) <: AbstractFloat
+        return dev(Float32.(x))
+    else
+        return dev(x)
+    end
+end
+
+function _to_gpu_float32_preserve_basis(dev, x::Tuple)
+    return map(v -> _to_gpu_float32_preserve_basis(dev, v), x)
+end
+
+function _to_gpu_float32_preserve_basis(dev, x::NamedTuple)
+    return NamedTuple{keys(x)}(
+        map(v -> _to_gpu_float32_preserve_basis(dev, v), values(x))
+    )
+end
+
+# Fallback: try EquivariantTensors.float32 first; if unsupported, keep x.
+function _to_gpu_float32_preserve_basis(dev, x)
+    try
+        return dev(EquivariantTensors.float32(x))
+    catch err
+        if err isa MethodError
+            return x
+        else
+            rethrow(err)
+        end
+    end
+end
+
+function gpu_3center_params(dev, ps)
+    return _to_gpu_float32_preserve_basis(dev, ps)
+end
+
+function gpu_3center_state(dev, st)
+    return _to_gpu_float32_preserve_basis(dev, st)
+end
 # ---------------------------------------------------------------------------
 # Helper: update the basisset stored in `st` so the model can be applied
 # to a system with a different number of atoms / cell geometry.

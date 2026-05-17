@@ -14,9 +14,13 @@ using Zygote
 using Optimisers: destructure
 using JLD2
 
+cd("example")
 include("data/generate_data.jl")
 include("data/graphene_data.jl")
-#include("data/plot.jl")
+
+const USE_CUDA = false
+
+backend = RealMLTB.make_backend(USE_CUDA)
 
 
 # ============================================================
@@ -56,6 +60,8 @@ else
     println("  Done.")
 end
 
+backend = RealMLTB.enforce_backend_compatibility(backend, G_list)
+
 println("  nbas = $(bs.nbas), natoms = $(bs.natoms)")
 
 # ============================================================
@@ -67,28 +73,36 @@ NORB = 1
 filter_σ = 0.5
 cone_w = 2.0
 
+G_train     = RealMLTB.prepare_graphs(backend, G_list, NORB)
+λ_train     = RealMLTB.prepare_data(backend, λ_ref_list)
+ψ_train     = RealMLTB.prepare_data(backend, ψ_ref_list)
+proj_train  = RealMLTB.prepare_data(backend, proj_list)
+kw_train     = kw_list
+filter_train = filter_list
+
 # ----------------------------------------------------------------
 # Stage A: train potential V only
 # ----------------------------------------------------------------
 println("\n--- Stage A: train potential only ---")
 
 ps, st, model = multilevel_train_H(
-    G_list,
-    λ_ref_list,
-    ψ_ref_list,
-    proj_list,
-    kw_list,
+    G_train,
+    λ_train,
+    ψ_train,
+    proj_train,
+    kw_train,
     bs, NORB, rcut;
-    filter          = filter_list,
+    filter          = filter_train,
     filter_σ        = filter_σ,
     cone_w          = cone_w,
     model_type      = :acev_3c,
-    target_Dtot     = 8,
-    target_maxl     = 6,
-    target_ORD      = 3,
-    H_iterations    = 10,
+    target_Dtot     = 4,
+    target_maxl     = 3,
+    target_ORD      = 2,
+    H_iterations    = 1,
     verbose         = true,
     train_part      = :potential,
+    prepare_ps_st   = (ps, st) -> prepare_params_state(backend, ps, st),
 )
 
 # ----------------------------------------------------------------
@@ -97,12 +111,12 @@ ps, st, model = multilevel_train_H(
 println("\n--- Stage B: freeze potential, train basis only ---")
 
 loss_H_basis(p) = RMSE_H(
-    G_list,
-    λ_ref_list,
-    ψ_ref_list,
-    proj_list,
-    kw_list,
-    filter_list,
+    G_train,
+    λ_train,
+    ψ_train,
+    proj_train,
+    kw_train,
+    filter_train,
     model, p, st;
     filter_σ = filter_σ,
     cone_w   = cone_w,
@@ -121,12 +135,12 @@ ps, hist_basis, _ = RealMLTB._bfgs_refine(
 println("\n--- Stage C: fine-tune all ---")
 
 loss_H_all(p) = RMSE_H(
-    G_list,
-    λ_ref_list,
-    ψ_ref_list,
-    proj_list,
-    kw_list,
-    filter_list,
+    G_train,
+    λ_train,
+    ψ_train,
+    proj_train,
+    kw_train,
+    filter_train,
     model, p, st;
     filter_σ = filter_σ,
     cone_w   = cone_w,
@@ -146,14 +160,14 @@ println("\n  Training done.")
 # ============================================================
 println("\n=== Step 3: Evaluate ===")
 
-for i in eachindex(G_list)
+for i in eachindex(G_train)
     err_H = RMSE_H(
-        G_list[i],
-        λ_ref_list[i],
-        ψ_ref_list[i],
-        proj_list[i],
-        kw_list[i],
-        filter_list[i],
+        G_train[i],
+        λ_train[i],
+        ψ_train[i],
+        proj_train[i],
+        kw_train[i],
+        filter_train[i],
         model, ps, st;
         filter_σ, cone_w,
     )
@@ -167,8 +181,13 @@ println("\n=== Step 4: Band structure ===")
 
 name_comp = "cone"
 save_figure = true
+
+# Plotting / band-structure routines are kept on CPU.
+ps_cpu = to_cpu(ps)
+st_cpu = to_cpu(st)
+
 compute_and_save_bandstructures(
-    G_list[1], syslist[1], model, ps, st;
+    G_list[1], syslist[1], model, ps_cpu, st_cpu;
     kgrid      = [6, 6, 1],
     keep_bands = 8,
     xc_type    = "pbe",
@@ -179,7 +198,7 @@ compute_and_save_bandstructures(
 )
 
 plot_and_save_orbitals(
-    G_list[1], model, ps, st, bs;
+    G_list[1], model, ps_cpu, st_cpu, bs;
     iatom     = 1,
     orb_index = 1,
     xrange = (-5.5,5.5),

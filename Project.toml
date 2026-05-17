@@ -1,18 +1,22 @@
 name = "RealMLTB"
 uuid = "286394bb-3f90-4f00-a37d-1f8bcc864c17"
-version = "1.0.0-DEV"
 authors = ["Christoph Ortner <christophortner0@gmail.com>"]
+version = "1.0.0-DEV"
 
 [deps]
 AtomsBase = "a963bdd2-2df7-4f54-a1ee-49d51e6be12a"
+AtomsBuilder = "f5cc8831-eeb7-4288-8d9f-d6c1ddb77004"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 EquivariantTensors = "5e107534-7145-4f8f-b06f-47a52840c895"
+GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
 GaussianBasis = "9bb1a3dc-0d1c-467e-84f5-0c4ef701360a"
 GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Lux = "b2108857-7c20-44ae-9111-449ecde12c47"
 LuxCore = "bb33d45b-7691-41d6-9220-0943567d0623"
+MLDataDevices = "7e8f7934-dd98-4c1a-8fe8-92b47a384d40"
 Molecules = "5de6a177-b489-40a9-b2f4-524242b9b679"
 NeighbourLists = "2fcf5ba9-9ed4-57cf-b73f-ff513e316b9c"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
@@ -26,9 +30,11 @@ UnitfulAtomic = "a7773ee8-282e-5fa2-be4e-bd808c38a91a"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
+AtomsBuilder = "0.2.3"
 EquivariantTensors = "0.5.0"
+GPUArrays = "11.5.4"
+MLDataDevices = "1.17.10"
 Polynomials4ML = "0.5.8"
-Unitful = "1.28.0"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

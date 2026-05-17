@@ -1,10 +1,3 @@
-# assembly.jl  (AsmTrip2Dense layer + _assemble_dense + pullback)
-#
-# Converts (G, vH, vS) produced by _3center_triplet into k-dependent
-# dense Bloch Hamiltonian and overlap matrices H(k), S(k).
-#
-# Rcell field name in edge_data: R_cell  (from nlist2graph)
-
 using Base.Threads: @threads
 using ChainRulesCore: unthunk, NoTangent
 using StaticArrays
@@ -287,12 +280,146 @@ function _hermitize_dense_kernel!(Hout, Sout, dim::Int, nk::Int)
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Helpers for cut_integrals CUDA dense assembly
+# ---------------------------------------------------------------------------
+
+function _cuda_klist_matrix_for_assembly(klist, ::Type{T}) where {T}
+    if klist isa CUDA.CuArray && ndims(klist) == 2
+        return eltype(klist) === T ? klist : T.(klist)
+    end
+
+    if klist isa CUDA.CuArray
+        # Copy whole object to CPU; this is not scalar indexing.
+        kcpu = Array(klist)
+        if kcpu isa AbstractVector
+            return CUDA.cu(T.(reduce(hcat, kcpu)))
+        elseif kcpu isa AbstractMatrix
+            return CUDA.cu(T.(kcpu))
+        else
+            error("Unsupported CUDA klist shape/type for assembly: $(typeof(klist)), size=$(size(klist))")
+        end
+    end
+
+    if klist isa AbstractVector
+        return CUDA.cu(T.(reduce(hcat, klist)))
+    elseif klist isa AbstractMatrix
+        return CUDA.cu(T.(klist))
+    else
+        error("Unsupported klist type for CUDA assembly: $(typeof(klist))")
+    end
+end
+
+function _cut_cuda_block_arrays(G, ::Type{T}) where {T}
+    block_meta = _cut_block_metadata(G)
+    nblocks = length(block_meta)
+
+    ii = Vector{Int}(undef, nblocks)
+    jj = Vector{Int}(undef, nblocks)
+    Rcell_cpu = zeros(T, 3, nblocks)
+
+    for e in 1:nblocks
+        meta = block_meta[e]
+        ii[e] = meta.i
+        jj[e] = meta.j
+        R = meta.R_cell
+        Rcell_cpu[1, e] = T(R[1])
+        Rcell_cpu[2, e] = T(R[2])
+        Rcell_cpu[3, e] = T(R[3])
+    end
+
+    return ii, jj, CUDA.cu(Rcell_cpu)
+end
+
+function _assemble_dense_cut_gpu(
+    G,
+    vH::CUDA.CuArray{TH,3},
+    vS::CUDA.CuArray{TH,3},
+    klist_unused,
+) where {TH <: Real}
+
+    nat = length(G.first) - 1
+    NORB = size(vH, 1)
+
+    ii, jj, Rcell = _cut_cuda_block_arrays(G, TH)
+    nedges = length(ii)
+
+    @assert size(vH, 3) == nat + nedges
+    @assert size(vS, 3) == nat + nedges
+
+    klist = _cuda_klist_matrix_for_assembly(klist_unused, TH)
+    nk = size(klist, 2)
+
+    dim = nat * NORB
+    TC = Complex{TH}
+
+    Hout = CUDA.zeros(TC, dim, dim, nk)
+    Sout = CUDA.zeros(TC, dim, dim, nk)
+
+    threads = 256
+
+    # onsite blocks
+    N_on = nat * NORB * NORB * nk
+    blocks_on = cld(N_on, threads)
+
+    @cuda threads=threads blocks=blocks_on _assemble_onsite_kernel!(
+        Hout,
+        Sout,
+        vH,
+        vS,
+        nat,
+        NORB,
+        nk,
+    )
+
+    # offsite/additive cut blocks
+    N_edge = NORB * NORB * nk
+    blocks_edge = cld(N_edge, threads)
+
+    for e in 1:nedges
+        i = ii[e]
+        j = jj[e]
+
+        @cuda threads=threads blocks=blocks_edge _assemble_offsite_edge_kernel!(
+            Hout,
+            Sout,
+            vH,
+            vS,
+            klist,
+            Rcell,
+            e,
+            i,
+            j,
+            nat,
+            NORB,
+            nk,
+        )
+    end
+
+    # Hermitize
+    N_herm = dim * dim * nk
+    blocks_herm = cld(N_herm, threads)
+
+    @cuda threads=threads blocks=blocks_herm _hermitize_dense_kernel!(
+        Hout,
+        Sout,
+        dim,
+        nk,
+    )
+
+    return Hout, Sout
+end
+
 function _assemble_dense(
     G,
     vH::CUDA.CuArray{TH,3},
     vS::CUDA.CuArray{TH,3},
     klist_unused,
 ) where {TH <: Real}
+
+    if @isdefined(_is_cut_graph) && _is_cut_graph(G)
+        return _assemble_dense_cut_gpu(G, vH, vS, klist_unused)
+    end
 
     cache = G.graph_data.threecenter_cache
 
@@ -466,6 +593,92 @@ function _assemble_dense_pullback_offsite_kernel!(
     return nothing
 end
 
+function _assemble_dense_cut_gpu_rrule(
+    G,
+    vH::CUDA.CuArray{TH,3},
+    vS::CUDA.CuArray{TH,3},
+    klist_unused,
+) where {TH <: Real}
+
+    Hout, Sout = _assemble_dense_cut_gpu(G, vH, vS, klist_unused)
+
+    nat = length(G.first) - 1
+    NORB = size(vH, 1)
+
+    ii, jj, Rcell = _cut_cuda_block_arrays(G, TH)
+    nedges = length(ii)
+
+    klist = _cuda_klist_matrix_for_assembly(klist_unused, TH)
+    nk = size(klist, 2)
+
+    function pullback_assemble_dense_cut_gpu(ΔΩ)
+        ΔHout_raw = unthunk(ΔΩ[1])
+        ΔSout_raw = unthunk(ΔΩ[2])
+
+        ΔHout = _zero_if_not_array(ΔHout_raw, Hout)
+        ΔSout = _zero_if_not_array(ΔSout_raw, Sout)
+
+        # adjoint of hermitize: X -> (X + X')/2
+        ΔHsym = (ΔHout .+ permutedims(conj.(ΔHout), (2, 1, 3))) ./ 2
+        ΔSsym = (ΔSout .+ permutedims(conj.(ΔSout), (2, 1, 3))) ./ 2
+
+        TC = eltype(Hout)
+
+        vHbar = CUDA.zeros(TC, size(vH))
+        vSbar = CUDA.zeros(TC, size(vS))
+
+        threads = 256
+
+        # onsite
+        N_on = nat * NORB * NORB
+        blocks_on = cld(N_on, threads)
+
+        @cuda threads=threads blocks=blocks_on _assemble_dense_pullback_onsite_kernel!(
+            vHbar,
+            vSbar,
+            ΔHsym,
+            ΔSsym,
+            nat,
+            NORB,
+            nk,
+        )
+
+        # offsite/additive cut blocks
+        N_edge = NORB * NORB
+        blocks_edge = cld(N_edge, threads)
+
+        for e in 1:nedges
+            i = ii[e]
+            j = jj[e]
+
+            @cuda threads=threads blocks=blocks_edge _assemble_dense_pullback_offsite_kernel!(
+                vHbar,
+                vSbar,
+                ΔHsym,
+                ΔSsym,
+                klist,
+                Rcell,
+                e,
+                i,
+                j,
+                nat,
+                NORB,
+                nk,
+            )
+        end
+
+        return (
+            NoTangent(),  # typeof(_assemble_dense)
+            NoTangent(),  # G
+            vHbar,
+            vSbar,
+            NoTangent(),  # klist
+        )
+    end
+
+    return (Hout, Sout), pullback_assemble_dense_cut_gpu
+end
+
 function ChainRulesCore.rrule(
     ::typeof(_assemble_dense),
     G,
@@ -473,6 +686,10 @@ function ChainRulesCore.rrule(
     vS::CUDA.CuArray{TH,3},
     klist_unused,
 ) where {TH <: Real}
+
+    if @isdefined(_is_cut_graph) && _is_cut_graph(G)
+        return _assemble_dense_cut_gpu_rrule(G, vH, vS, klist_unused)
+    end
 
     Hout, Sout = _assemble_dense(G, vH, vS, klist_unused)
 
