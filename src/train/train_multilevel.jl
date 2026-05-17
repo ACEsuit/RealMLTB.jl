@@ -45,13 +45,16 @@ function get_nnll_spec(tensor)
     for A2Bmap in tensor.A2Bmaps
         nBB = size(A2Bmap, 1)
         nnll_list = Vector{NT_NL_SPEC}[]
+
         for i in 1:nBB
             AAidx_nnz = A2Bmap[i, :].nzind
             bbs = spec[AAidx_nnz]
             signature = _nl(bbs[1])
+
             @assert all(signature == _nl(bb) for bb in bbs)
             push!(nnll_list, signature)
         end
+
         push!(nnll_all, nnll_list)
     end
 
@@ -66,13 +69,16 @@ function transfer_component_weights(tensor_small, W_small, tensor_large, W_large
 
     for k in eachindex(specs_large)
         small_lookup = Dict{Vector{NT_NL_SPEC}, Int}()
+
         for (idx, spec) in enumerate(specs_small[k])
             small_lookup[spec] = idx
         end
 
         n_rows_large, _ = size(W_large_new[k])
+
         for idx_L in 1:n_rows_large
             spec_L = specs_large[k][idx_L]
+
             if haskey(small_lookup, spec_L)
                 idx_S = small_lookup[spec_L]
                 W_large_new[k][idx_L, :] = W_small[k][idx_S, :]
@@ -100,6 +106,7 @@ function embed_acev_3c_params(prev_model, prev_ps, model, ps_init)
 
     W_small = _get_WLL(prev_ps.layer_1.ace)
     W_large_template = _get_WLL(ps_init.layer_1.ace)
+
     W_new = transfer_component_weights(tensor_small, W_small, tensor_large, W_large_template)
 
     ps_ace_new = _set_WLL(ps_init.layer_1.ace, W_new)
@@ -116,21 +123,30 @@ end
 function _embed_ace3c_params(prev_model, prev_ps, model, ps_init)
     acev_small = prev_model.layers.layer_1.ace_v_model
     acev_large = model.layers.layer_1.ace_v_model
+
     Wv_new = transfer_component_weights(
-        _get_symbasis(acev_small), _get_WLL(prev_ps.layer_1.acev),
-        _get_symbasis(acev_large), _get_WLL(ps_init.layer_1.acev),
+        _get_symbasis(acev_small),
+        _get_WLL(prev_ps.layer_1.acev),
+        _get_symbasis(acev_large),
+        _get_WLL(ps_init.layer_1.acev),
     )
+
     ps_acev_new = _set_WLL(ps_init.layer_1.acev, Wv_new)
 
     wpsi_small = prev_model.layers.layer_1.wpsi_model
     wpsi_large = model.layers.layer_1.wpsi_model
+
     Wψ_new = transfer_component_weights(
-        _get_symbasis(wpsi_small), _get_WLL(prev_ps.layer_1.wpsi),
-        _get_symbasis(wpsi_large), _get_WLL(ps_init.layer_1.wpsi),
+        _get_symbasis(wpsi_small),
+        _get_WLL(prev_ps.layer_1.wpsi),
+        _get_symbasis(wpsi_large),
+        _get_WLL(ps_init.layer_1.wpsi),
     )
+
     ps_wpsi_new = _set_WLL(ps_init.layer_1.wpsi, Wψ_new)
 
     new_layer1 = merge(ps_init.layer_1, (; acev = ps_acev_new, wpsi = ps_wpsi_new))
+
     return merge(ps_init, (; layer_1 = new_layer1))
 end
 
@@ -148,25 +164,33 @@ function _build_model_builder(model_type::Symbol, nψ, rng, embed_func)
     if model_type == :simple3c
         model_builder = (bs, NORB, rcut; Dtot = 0, maxl = 0, ORD = 0, rng = rng) ->
             simple_3c_model(bs, NORB)
+
         return model_builder, nothing
 
     elseif model_type == :acev_3c
         model_builder = (bs, NORB, rcut; Dtot, maxl, ORD, rng = rng) ->
             acev_3c_model(bs, NORB, rcut; Dtot = Dtot, maxl = maxl, ORD = ORD, rng = rng)
+
         embed = isnothing(embed_func) ? embed_acev_3c_params : embed_func
+
         return model_builder, embed
 
     elseif model_type == :ace3c_B
         model_builder = (bs, NORB, rcut; Dtot, maxl, ORD, rng = rng) ->
             ace3c_B_model(bs, NORB, rcut; Dtot = Dtot, maxl = maxl, ORD = ORD, rng = rng)
+
         embed = isnothing(embed_func) ? embed_ace3c_B_params : embed_func
+
         return model_builder, embed
 
     elseif model_type == :ace3c_A
         isnothing(nψ) && error(":ace3c_A requires keyword nψ = (...)")
+
         model_builder = (bs, NORB, rcut; Dtot, maxl, ORD, rng = rng) ->
             ace3c_A_model(bs, nψ, rcut; Dtot = Dtot, maxl = maxl, ORD = ORD, rng = rng)
+
         embed = isnothing(embed_func) ? embed_ace3c_A_params : embed_func
+
         return model_builder, embed
 
     else
@@ -179,17 +203,25 @@ end
 # ============================================================================
 
 function _phase3_enabled(ψ_ref, proj, kweights, filter)
-    return ψ_ref !== nothing && proj !== nothing && kweights !== nothing && filter !== nothing
+    return ψ_ref !== nothing &&
+           proj !== nothing &&
+           kweights !== nothing &&
+           filter !== nothing
 end
 
-function _print_ladder_summary(model_type, target_Dtot, target_maxl, target_ORD, ladder,
-    ψ_ref, proj, kweights, filter, H_iterations)
+function _print_ladder_summary(model_type, target_Dtot, target_maxl, target_ORD,
+                               ladder, ψ_ref, proj, kweights, filter, H_iterations;
+                               train_part::Symbol = :all,
+                               H_train_part::Symbol = train_part)
     println("\n=== Start Progressive Training ===")
     println("Type: $model_type | target Dtot=$target_Dtot maxl=$target_maxl ORD=$target_ORD")
     println("Levels: $(length(ladder))")
+    println("Train part: $train_part | H train part: $H_train_part")
+
     for (i, cfg) in enumerate(ladder)
         println("  Level $i: Dtot=$(cfg.Dtot), maxl=$(cfg.maxl), ORD=$(cfg.ORD)")
     end
+
     if _phase3_enabled(ψ_ref, proj, kweights, filter)
         println("Phase 3 (RMSE_H fine-tune): enabled, $H_iterations BFGS steps")
     else
@@ -198,32 +230,58 @@ function _print_ladder_summary(model_type, target_Dtot, target_maxl, target_ORD,
 end
 
 function _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
-    model = model_builder(bs, NORB, rcut;
+    model = model_builder(
+        bs,
+        NORB,
+        rcut;
         Dtot = cfg.Dtot,
         maxl = cfg.maxl,
         ORD = cfg.ORD,
         rng = rng,
     )
+
     ps_init, st_init = LuxCore.setup(rng, model)
+
     return model, ps_init, st_init
 end
 
-function _prepare_level_parameters(i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
-    embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter)
+function _prepare_level_parameters(i, verbose, prev_model, prev_ps, current_model,
+                                   ps_init, st_init, embed_func, G, λ_ref,
+                                   keep_bands, ψ_ref, proj, kweights, filter)
     if i == 1 || isnothing(embed_func)
         verbose && println("    Init: random")
         return ps_init, st_init
     end
 
     verbose && println("    Init: warm-start from Level $(i - 1)")
+
     ps_warm = embed_func(prev_model, prev_ps, current_model, ps_init)
 
     if verbose
         if _phase3_enabled(ψ_ref, proj, kweights, filter)
-            err0 = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, current_model, ps_warm, st_init; )
+            err0 = RMSE_H(
+                G,
+                λ_ref,
+                ψ_ref,
+                proj,
+                kweights,
+                filter,
+                current_model,
+                ps_warm,
+                st_init,
+            )
+
             println("    RMSE_H after warm-start: $err0")
         else
-            err0 = RMSE(G, λ_ref, current_model, ps_warm, st_init; keep_bands = keep_bands)
+            err0 = RMSE(
+                G,
+                λ_ref,
+                current_model,
+                ps_warm,
+                st_init;
+                keep_bands = keep_bands,
+            )
+
             println("    RMSE after warm-start: $err0")
         end
     end
@@ -242,37 +300,93 @@ function _train_level(G, λ_ref, model, ps, st, keep_bands;
     kweights,
     filter,
     H_iterations,
+    train_part::Symbol = :all,
+    H_train_part::Symbol = train_part,
 )
     ps_opt, history = train(
-        G, model, ps, st, keep_bands, λ_ref;
+        G,
+        model,
+        ps,
+        st,
+        keep_bands,
+        λ_ref;
         iterations = base_iterations,
         adam_iterations = adam_iterations,
         adam_lr = adam_lr,
         grad_clip = grad_clip,
         adam_patience = adam_patience,
+        train_part = train_part,
+        H_train_part = H_train_part,
         ψ_ref = ψ_ref,
         proj = proj,
         kweights = kweights,
         filter = filter,
         H_iterations = H_iterations,
     )
+
     return ps_opt, history
 end
 
-function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; H_iterations::Int, cone_w::Float64, filter_σ::Float64)
-    loss_H(p) = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, p, st; cone_w, filter_σ)
-    ps_opt, history, _ = _bfgs_refine(loss_H, ps; iterations = H_iterations)
+function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st;
+    H_iterations::Int,
+    cone_w::Float64,
+    filter_σ::Float64,
+    train_part::Symbol = :all,
+)
+    loss_H(p) = RMSE_H(
+        G,
+        λ_ref,
+        ψ_ref,
+        proj,
+        kweights,
+        filter,
+        model,
+        p,
+        st;
+        cone_w = cone_w,
+        filter_σ = filter_σ,
+    )
+
+    ps_opt, history, _ = _bfgs_refine(
+        loss_H,
+        ps;
+        iterations = H_iterations,
+        train_part = train_part,
+    )
+
     return ps_opt, history
 end
 
-function _report_level_done(verbose, i, G, λ_ref, model, ps, st, keep_bands, ψ_ref, proj, kweights, filter, cone_w, filter_σ)
+function _report_level_done(verbose, i, G, λ_ref, model, ps, st, keep_bands,
+                            ψ_ref, proj, kweights, filter, cone_w, filter_σ)
     verbose || return
 
     if _phase3_enabled(ψ_ref, proj, kweights, filter)
-        err_H = RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st; cone_w, filter_σ)
+        err_H = RMSE_H(
+            G,
+            λ_ref,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
+            model,
+            ps,
+            st;
+            cone_w = cone_w,
+            filter_σ = filter_σ,
+        )
+
         println("    Done Level $i. RMSE_H: $err_H")
     else
-        err1 = RMSE(G, λ_ref, model, ps, st; keep_bands = keep_bands)
+        err1 = RMSE(
+            G,
+            λ_ref,
+            model,
+            ps,
+            st;
+            keep_bands = keep_bands,
+        )
+
         println("    Done Level $i. RMSE_λ: $err1")
     end
 end
@@ -295,6 +409,14 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     adam_patience::Int = max(adam_iterations, 1),
     verbose::Bool = true,
     embed_func = nothing,
+
+    # New: choose which part to train.
+    #   :all
+    #   :potential
+    #   :basis
+    train_part::Symbol = :all,
+    H_train_part::Symbol = train_part,
+
     ψ_ref = nothing,
     proj = nothing,
     kweights = nothing,
@@ -305,14 +427,25 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     ladder = generate_ladder(target_Dtot, target_maxl, target_ORD)
 
     verbose && _print_ladder_summary(
-        model_type, target_Dtot, target_maxl, target_ORD, ladder,
-        ψ_ref, proj, kweights, filter, H_iterations,
+        model_type,
+        target_Dtot,
+        target_maxl,
+        target_ORD,
+        ladder,
+        ψ_ref,
+        proj,
+        kweights,
+        filter,
+        H_iterations;
+        train_part = train_part,
+        H_train_part = H_train_part,
     )
 
     model_builder, embed_func = _build_model_builder(model_type, nψ, rng, embed_func)
 
     prev_model = nothing
     prev_ps = nothing
+
     current_model = nothing
     current_ps = nothing
     current_st = nothing
@@ -322,15 +455,39 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     for (i, cfg) in enumerate(ladder)
         verbose && println("\n>>> [Level $i/$n_levels] Dtot=$(cfg.Dtot) maxl=$(cfg.maxl) ORD=$(cfg.ORD)")
 
-        current_model, ps_init, st_init = _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
+        current_model, ps_init, st_init =
+            _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
+
         current_ps, current_st = _prepare_level_parameters(
-            i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
-            embed_func, G, λ_ref, keep_bands, ψ_ref, proj, kweights, filter,
+            i,
+            verbose,
+            prev_model,
+            prev_ps,
+            current_model,
+            ps_init,
+            st_init,
+            embed_func,
+            G,
+            λ_ref,
+            keep_bands,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
         )
 
-        verbose && println("    Training: $base_iterations BFGS iterations, $adam_iterations Adam steps")
+        verbose && println(
+            "    Training: $base_iterations BFGS iterations, " *
+            "$adam_iterations Adam steps, train_part=$train_part, H_train_part=$H_train_part"
+        )
+
         current_ps, _ = _train_level(
-            G, λ_ref, current_model, current_ps, current_st, keep_bands;
+            G,
+            λ_ref,
+            current_model,
+            current_ps,
+            current_st,
+            keep_bands;
             adam_iterations = adam_iterations,
             base_iterations = base_iterations,
             adam_lr = adam_lr,
@@ -341,11 +498,25 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
             kweights = kweights,
             filter = filter,
             H_iterations = H_iterations,
+            train_part = train_part,
+            H_train_part = H_train_part,
         )
 
         _report_level_done(
-            verbose, i, G, λ_ref, current_model, current_ps, current_st, keep_bands,
-            ψ_ref, proj, kweights, filter, 1.0, 1.0,
+            verbose,
+            i,
+            G,
+            λ_ref,
+            current_model,
+            current_ps,
+            current_st,
+            keep_bands,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
+            1.0,
+            1.0,
         )
 
         prev_model = current_model
@@ -353,6 +524,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     end
 
     verbose && println("\n=== Progressive Training Completed ===")
+
     return current_ps, current_st, current_model
 end
 
@@ -372,6 +544,12 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     filter_σ::Float64 = 0.5,
     verbose::Bool = true,
     embed_func = nothing,
+
+    # New:
+    #   :all
+    #   :potential
+    #   :basis
+    train_part::Symbol = :all,
 )
     rng = MersenneTwister()
     ladder = generate_ladder(target_Dtot, target_maxl, target_ORD)
@@ -380,9 +558,12 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
         println("\n=== Start H-only Progressive Training ===")
         println("Type: $model_type | target Dtot=$target_Dtot maxl=$target_maxl ORD=$target_ORD")
         println("Levels: $(length(ladder))")
+        println("H-only train_part: $train_part")
+
         for (i, cfg) in enumerate(ladder)
             println("  Level $i: Dtot=$(cfg.Dtot), maxl=$(cfg.maxl), ORD=$(cfg.ORD)")
         end
+
         println("H-only training: every level uses RMSE_H, $H_iterations BFGS steps")
     end
 
@@ -390,6 +571,7 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
 
     prev_model = nothing
     prev_ps = nothing
+
     current_model = nothing
     current_ps = nothing
     current_st = nothing
@@ -399,28 +581,60 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     for (i, cfg) in enumerate(ladder)
         verbose && println("\n>>> [Level $i/$n_levels] Dtot=$(cfg.Dtot) maxl=$(cfg.maxl) ORD=$(cfg.ORD)")
 
-        current_model, ps_init, st_init = _initialise_level(
-            model_builder, bs, NORB, rcut, cfg, rng
-        )
+        current_model, ps_init, st_init =
+            _initialise_level(model_builder, bs, NORB, rcut, cfg, rng)
 
         current_ps, current_st = _prepare_level_parameters(
-            i, verbose, prev_model, prev_ps, current_model, ps_init, st_init,
-            embed_func, G, λ_ref, 1, ψ_ref, proj, kweights, filter,
+            i,
+            verbose,
+            prev_model,
+            prev_ps,
+            current_model,
+            ps_init,
+            st_init,
+            embed_func,
+            G,
+            λ_ref,
+            1,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
         )
 
-        verbose && println("    Training: $H_iterations BFGS steps on RMSE_H")
+        verbose && println("    Training: $H_iterations BFGS steps on RMSE_H, train_part=$train_part")
 
         current_ps, _ = _train_level_H(
-            G, λ_ref, ψ_ref, proj, kweights, filter,
-            current_model, current_ps, current_st;
+            G,
+            λ_ref,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
+            current_model,
+            current_ps,
+            current_st;
             H_iterations = H_iterations,
             cone_w = cone_w,
-            filter_σ = filter_σ
+            filter_σ = filter_σ,
+            train_part = train_part,
         )
 
         _report_level_done(
-            verbose, i, G, λ_ref, current_model, current_ps, current_st, 1,
-            ψ_ref, proj, kweights, filter, cone_w, filter_σ
+            verbose,
+            i,
+            G,
+            λ_ref,
+            current_model,
+            current_ps,
+            current_st,
+            1,
+            ψ_ref,
+            proj,
+            kweights,
+            filter,
+            cone_w,
+            filter_σ,
         )
 
         prev_model = current_model
@@ -428,5 +642,6 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     end
 
     verbose && println("\n=== H-only Progressive Training Completed ===")
+
     return current_ps, current_st, current_model
 end

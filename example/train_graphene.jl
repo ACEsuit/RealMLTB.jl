@@ -16,7 +16,7 @@ using JLD2
 
 include("data/generate_data.jl")
 include("data/graphene_data.jl")
-include("data/plot.jl")
+#include("data/plot.jl")
 
 
 # ============================================================
@@ -63,9 +63,15 @@ println("  nbas = $(bs.nbas), natoms = $(bs.natoms)")
 # ============================================================
 println("\n=== Step 2: Train ===")
 
-NORB = 1        # number of orbitals for each atom
-filter_σ = 0.5  # smoothing parameter for Fermi filter
-cone_w = 2.0    # weight of the Dirac cone
+NORB = 1
+filter_σ = 0.5
+cone_w = 2.0
+
+# ----------------------------------------------------------------
+# Stage A: train potential V only
+# ----------------------------------------------------------------
+println("\n--- Stage A: train potential only ---")
+
 ps, st, model = multilevel_train_H(
     G_list,
     λ_ref_list,
@@ -73,32 +79,65 @@ ps, st, model = multilevel_train_H(
     proj_list,
     kw_list,
     bs, NORB, rcut;
-    filter = filter_list,
-    filter_σ, cone_w, 
+    filter          = filter_list,
+    filter_σ        = filter_σ,
+    cone_w          = cone_w,
     model_type      = :acev_3c,
     target_Dtot     = 8,
     target_maxl     = 6,
     target_ORD      = 3,
-    H_iterations    = 100,
+    H_iterations    = 10,
     verbose         = true,
-);
-
-#= 
-# ----------------------------------------------------------------
-# train the band structures
-# ----------------------------------------------------------------
-ps, st, model = multilevel_train(
-    G_list[1], λ_ref_list[1], bs, NORB, rcut;
-    model_type      = :acev_3c,
-    target_Dtot     = 14,
-    target_maxl     = 4,
-    target_ORD      = 3,
-    keep_bands      = 4,
-    adam_iterations = 200,
-    base_iterations = 500,
-    verbose         = true,
+    train_part      = :potential,
 )
-=#
+
+# ----------------------------------------------------------------
+# Stage B: freeze potential V, train minimal basis Wb only
+# ----------------------------------------------------------------
+println("\n--- Stage B: freeze potential, train basis only ---")
+
+loss_H_basis(p) = RMSE_H(
+    G_list,
+    λ_ref_list,
+    ψ_ref_list,
+    proj_list,
+    kw_list,
+    filter_list,
+    model, p, st;
+    filter_σ = filter_σ,
+    cone_w   = cone_w,
+)
+
+ps, hist_basis, _ = RealMLTB._bfgs_refine(
+    loss_H_basis,
+    ps;
+    iterations = 100,
+    train_part = :basis,
+)
+
+# ----------------------------------------------------------------
+# Stage C: fine-tune all parameters together
+# ----------------------------------------------------------------
+println("\n--- Stage C: fine-tune all ---")
+
+loss_H_all(p) = RMSE_H(
+    G_list,
+    λ_ref_list,
+    ψ_ref_list,
+    proj_list,
+    kw_list,
+    filter_list,
+    model, p, st;
+    filter_σ = filter_σ,
+    cone_w   = cone_w,
+)
+
+ps, hist_all, _ = RealMLTB._bfgs_refine(
+    loss_H_all,
+    ps;
+    iterations = 100,
+    train_part = :all,
+)
 
 println("\n  Training done.")
 
