@@ -192,7 +192,7 @@ function build_ref_and_graph_lists_sph_graphene(syslist, rcut, kgrid, filter::Fe
         klist, kweights, proj, f_i, λs, ψs = generate_data_graphene(sys, kgrid, filter, bs_i; kws...)
 
         println("==== [$i] build ETGraph ===="); flush(stdout)
-        G = RealMLTB.nlist2graph(bs_i, nlist, sys, klist)
+        G = RealMLTB.nlist2graph_cut(bs_i, nlist, sys, klist)
 
         λ_ref_list[i]  = λs
         ψ_ref_list[i]  = ψs

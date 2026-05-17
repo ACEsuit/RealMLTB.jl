@@ -136,7 +136,7 @@ function build_ref_and_graph_lists_sph(syslist, rcut, kgrid;
         klist, λ_ref = generate_data(sys, kgrid; keep_bands = keep_bands)
 
         println("==== [$i] build ETGraph ===="); flush(stdout)
-        G = RealMLTB.nlist2graph(bs_i, nlist, sys, klist)
+        G = RealMLTB.nlist2graph_cut(bs_i, nlist, sys, klist)
 
         λ_ref_list[i] = λ_ref
         G_list[i]     = G
@@ -173,7 +173,7 @@ function build_ref_and_graph_lists_cart(syslist, rcut, kgrid;
         klist, λ_ref = generate_data(sys, kgrid; keep_bands = keep_bands)
 
         println("==== [$i] build ETGraph ===="); flush(stdout)
-        G = RealMLTB.nlist2graph(bs_i, nlist, sys, klist)
+        G = RealMLTB.nlist2graph_cut(bs_i, nlist, sys, klist)
 
         λ_ref_list[i] = λ_ref
         G_list[i]     = G

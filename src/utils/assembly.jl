@@ -15,6 +15,16 @@ struct AsmTrip2Dense <: Lux.AbstractLuxLayer end
 LuxCore.initialparameters(::AbstractRNG, ::AsmTrip2Dense) = NamedTuple()
 LuxCore.initialstates(::AbstractRNG, ::AsmTrip2Dense)     = NamedTuple()
 
+
+function _assembly_block_metadata(G)
+    if @isdefined(_is_cut_graph) && _is_cut_graph(G)
+        return _cut_block_metadata(G)
+    end
+    ii, jj = _get_ii_jj(G)
+    return [(kind = :edge, i = ii[e], j = jj[e], k = 0, R_cell = G.edge_data[e].R_cell)
+            for e in eachindex(ii)]
+end
+
 function (l::AsmTrip2Dense)(x, ps, st)
     G, vH, vS, Wb = x
     klist = G.graph_data.klist
@@ -35,14 +45,10 @@ function _assemble_dense(G,
                          vH::AbstractVector{<:SMatrix{NORB,NORB,TH}},
                          vS::AbstractVector{<:SMatrix{NORB,NORB,TH}},
                          klist) where {NORB, TH}
-    ii    = _get_ii_jj(G)[1]
-    jj    = _get_ii_jj(G)[2]
+    block_meta = _assembly_block_metadata(G)
     nat   = length(G.first) - 1
     nk    = length(klist)
     TC    = Complex{TH}
-
-    # R_cell stored per edge in nlist2graph
-    Rcell = [ed.R_cell for ed in G.edge_data]
 
     dim = NORB * nat
 
@@ -63,13 +69,14 @@ function _assemble_dense(G,
             end
         end
 
-        # offsite
-        for e in eachindex(ii)
-            i     = ii[e]
-            j     = jj[e]
+        # offsite/additive cut blocks
+        for e in eachindex(block_meta)
+            meta  = block_meta[e]
+            i     = meta.i
+            j     = meta.j
             Ii    = _indexblock(i, NORB)
             Ij    = _indexblock(j, NORB)
-            phase = exp(im * dot(k, Rcell[e]))
+            phase = exp(im * dot(k, meta.R_cell))
 
             @inbounds for a in 1:NORB, b in 1:NORB
                 H[Ii[a], Ij[b]] += vH[nat + e][a, b] * phase
@@ -101,11 +108,9 @@ function ChainRulesCore.rrule(::typeof(_assemble_dense), G,
         ΔHout = unthunk(ΔΩ[1])
         ΔSout = unthunk(ΔΩ[2])
 
-        ii    = _get_ii_jj(G)[1]
-        jj    = _get_ii_jj(G)[2]
+        block_meta = _assembly_block_metadata(G)
         nat   = length(G.first) - 1
         nk    = length(klist)
-        Rcell = [ed.R_cell for ed in G.edge_data]
         L     = length(vH)
         TC    = Complex{TH}
 
@@ -127,17 +132,18 @@ function ChainRulesCore.rrule(::typeof(_assemble_dense), G,
             end
         end
 
-        # offsite: conj(phase) factor
-        @threads for e in eachindex(ii)
-            i   = ii[e]
-            j   = jj[e]
+        # offsite/additive cut blocks: conj(phase) factor
+        @threads for e in eachindex(block_meta)
+            meta = block_meta[e]
+            i   = meta.i
+            j   = meta.j
             Ii  = _indexblock(i, NORB)
             Ij  = _indexblock(j, NORB)
             idx = nat + e
 
             for ik in 1:nk
                 k      = klist[ik]
-                cphase = conj(exp(im * dot(k, Rcell[e])))
+                cphase = conj(exp(im * dot(k, meta.R_cell)))
                 @inbounds for a in 1:NORB, b in 1:NORB
                     vH̄_mat[idx][a,b] += cphase * ΔHsym[ik][Ii[a], Ij[b]]
                     vS̄_mat[idx][a,b] += cphase * ΔSsym[ik][Ii[a], Ij[b]]

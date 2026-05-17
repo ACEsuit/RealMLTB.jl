@@ -2,9 +2,6 @@ using Base.Threads: @threads, nthreads, threadid
 using ChainRulesCore: unthunk, NoTangent
 using StaticArrays
 
-# ---------------------------------------------------------------------------
-# Safe accessors for ETGraph internals
-# ---------------------------------------------------------------------------
 @inline function _get_ii_jj(G)
     fn = fieldnames(typeof(G))
     if :ii ∈ fn && :jj ∈ fn
@@ -29,6 +26,218 @@ end
 @inline _edge_V(ed, integral_table) = integral_table[ed.integral_idx].V_pair
 @inline _edge_S(ed, integral_table) = integral_table[ed.integral_idx].S_pair
 
+@inline _is_cut_graph(G) = hasproperty(G.graph_data, :cut_integrals)
+
+function _zero_smatrix(::Type{TV}, ::Val{NORB}) where {TV,NORB}
+    return SMatrix{NORB,NORB,TV,NORB*NORB}(zeros(TV, NORB, NORB))
+end
+
+function _cut_atom_species(G, basis::BasisSet)
+    if hasproperty(G.graph_data, :atom_species)
+        return G.graph_data.atom_species
+    end
+
+    return [ChemicalSpecies(atomic_number = at.Z) for at in basis.atoms]
+end
+
+@inline function _cut_orb_range(i::Integer, NORB::Integer)
+    return (i - 1) * NORB .+ (1:NORB)
+end
+
+@inline function _block_range(i::Integer, n::Integer)
+    return (i - 1) * n .+ (1:n)
+end
+
+function _cut_ranges(G, Wv, Wb)
+    nat = length(G.first) - 1
+
+    NORB = size(Wb, 1) ÷ nat
+    NAO  = size(Wb, 2) ÷ nat
+    NWV  = length(Wv) ÷ nat
+
+    @assert size(Wb, 1) == nat * NORB
+    @assert size(Wb, 2) == nat * NAO
+    @assert length(Wv)  == nat * NWV
+    @assert NAO == NWV "Mismatch: Wb has NAO=$NAO per atom, but Wv has NWV=$NWV per atom."
+
+    orb_ranges = [_block_range(i, NORB) for i in 1:nat]
+    ao_ranges  = [_block_range(i, NAO)  for i in 1:nat]
+
+    return NORB, nat, orb_ranges, ao_ranges
+end
+
+# Contract along the third index:
+#   V3[a,b,c] * Wv[c] -> matrix[a,b]
+# This is the old convention and is kept for non-reinterpreted uses.
+function _contract_v3(V3::AbstractArray{<:Real,3}, Wvk::AbstractVector)
+    ni, nj, nk = size(V3)
+    @assert length(Wvk) == nk
+    return reshape(reshape(V3, ni * nj, nk) * Wvk, ni, nj)
+end
+
+# Contract along the second index:
+#   V3[a,b,c] * Wv[b] -> matrix[a,c]
+#
+# This is the convention needed for the cut graph:
+#   integral_idx = (i, p, j)
+#   V3 = ∫ φ_i φ_p φ_j
+#   p is the potential/Wv center
+#   j is the Hamiltonian column center and carries the Bloch phase.
+function _contract_v3_dim2(V3::AbstractArray{<:Real,3}, Wvp::AbstractVector)
+    ni, np, nj = size(V3)
+    @assert length(Wvp) == np
+
+    T = promote_type(eltype(V3), eltype(Wvp))
+    out = zeros(T, ni, nj)
+
+    @inbounds for j in 1:nj
+        for p in 1:np
+            wp = Wvp[p]
+            for i in 1:ni
+                out[i, j] += V3[i, p, j] * wp
+            end
+        end
+    end
+
+    return out
+end
+
+function _cut_block_metadata(G)
+    cut = G.graph_data.cut_integrals
+
+    T_off = cut.T_off
+    S_off = cut.S_off
+    V_off = cut.V_off
+
+    meta = Vector{NamedTuple{(:kind, :i, :j, :k, :R_cell)}}()
+    sizehint!(meta, length(T_off) + length(S_off) + length(V_off))
+
+    for ed in T_off
+        i, j = ed.integral_idx
+        push!(meta, (kind = :T, i = i, j = j, k = 0, R_cell = ed.R_cell))
+    end
+
+    for ed in S_off
+        i, j = ed.integral_idx
+        push!(meta, (kind = :S, i = i, j = j, k = 0, R_cell = ed.R_cell))
+    end
+
+    for ed in V_off
+        i, p, j = ed.integral_idx
+        push!(meta, (kind = :V, i = i, j = j, k = p, R_cell = ed.R_cell))
+    end
+
+    return meta
+end
+
+function _3center_triplet_cut(G, basis::BasisSet,
+                              Wv::AbstractVector,
+                              Wb::AbstractMatrix)
+    cut = G.graph_data.cut_integrals
+
+    T_off = cut.T_off
+    S_off = cut.S_off
+    V_off = cut.V_off
+
+    atom_species = _cut_atom_species(G, basis)
+
+    NORB, nat, orb_ranges, ao_ranges = _cut_ranges(G, Wv, Wb)
+    TV = eltype(Wv)
+
+    nblocks = nat + length(T_off) + length(S_off) + length(V_off)
+
+    vH = Vector{SMatrix{NORB,NORB,TV,NORB*NORB}}(undef, nblocks)
+    vS = Vector{SMatrix{NORB,NORB,TV,NORB*NORB}}(undef, nblocks)
+
+    zero_block = _zero_smatrix(TV, Val(NORB))
+
+    for i in 1:nat
+        rows_orb = orb_ranges[i]
+        rows_ao  = ao_ranges[i]
+
+        Zi = atom_species[i]
+
+        Wbi = Wb[rows_orb, rows_ao]
+        Wvi = Wv[rows_ao]
+
+        Hii, Sii = construct_integral(
+            Wvi,
+            Wbi,
+            G.graph_data.T_on[Zi],
+            G.graph_data.V_on[Zi],
+            G.graph_data.S_on[Zi],
+        )
+
+        vH[i] = SMatrix{NORB,NORB,TV}(Hii)
+        vS[i] = SMatrix{NORB,NORB,TV}(Sii)
+    end
+
+    offset = nat
+
+    @threads for e in eachindex(T_off)
+        ed = T_off[e]
+
+        i, j = ed.integral_idx
+
+        ri, rj = orb_ranges[i], orb_ranges[j]
+        ai, aj = ao_ranges[i], ao_ranges[j]
+
+        Hij = Wb[ri, ai] * (ed.w .* ed.V2) * Wb[rj, aj]'
+
+        vH[offset + e] = SMatrix{NORB,NORB,TV}(Hij)
+        vS[offset + e] = zero_block
+    end
+
+    offset += length(T_off)
+
+    @threads for e in eachindex(S_off)
+        ed = S_off[e]
+
+        i, j = ed.integral_idx
+
+        ri, rj = orb_ranges[i], orb_ranges[j]
+        ai, aj = ao_ranges[i], ao_ranges[j]
+
+        Sij = Wb[ri, ai] * (ed.w .* ed.V2) * Wb[rj, aj]'
+
+        vH[offset + e] = zero_block
+        vS[offset + e] = SMatrix{NORB,NORB,TV}(Sij)
+    end
+
+    # -----------------------------------------------------------------------
+    # Three-center potential contribution.
+    #
+    # Convention:
+    #   ed.integral_idx = (i, p, j)
+    #   ed.V3[a,b,c]    = ∫ φ_i[a] φ_p[b] φ_j[c]
+    #
+    # Contract with Wv on the potential center p:
+    #   Vij[a,c] = Σ_b V3[a,b,c] Wv_p[b]
+    #
+    # Then place into Hamiltonian block H_{i,j}.
+    # Bloch phase is handled later by assembly.jl using ed.R_cell.
+    # -----------------------------------------------------------------------
+    offset += length(S_off)
+
+    @threads for e in eachindex(V_off)
+        ed = V_off[e]
+
+        i, p, j = ed.integral_idx
+
+        ri, rj = orb_ranges[i], orb_ranges[j]
+        ai, ap, aj = ao_ranges[i], ao_ranges[p], ao_ranges[j]
+
+        Vij = _contract_v3_dim2(ed.V3, Wv[ap])
+
+        Hij = Wb[ri, ai] * (ed.w .* Vij) * Wb[rj, aj]'
+
+        vH[offset + e] = SMatrix{NORB,NORB,TV}(Hij)
+        vS[offset + e] = zero_block
+    end
+
+    return vH, vS
+end
+
 # ---------------------------------------------------------------------------
 # _3center_triplet
 #
@@ -37,13 +246,19 @@ end
 #   S_{ij} = Wb_i * S_{ij}^{AO} * Wb_j'
 # and return them as SMatrix vectors vH, vS.
 #
-# Layout: vH[1:nat]     = onsite blocks (i,i)
-#         vH[nat+1:end] = offsite blocks in edge order
+# Layout:
+#   vH[1:nat]     = onsite blocks (i,i)
+#   vH[nat+1:end] = offsite/additive blocks in metadata order
 # ---------------------------------------------------------------------------
 function _3center_triplet(G, basis::BasisSet,
                           Wv::AbstractVector,
                           Wb::AbstractMatrix)
+    if _is_cut_graph(G)
+        return _3center_triplet_cut(G, basis, Wv, Wb)
+    end
+
     ii, jj = _get_ii_jj(G)
+
     edge_data = G.edge_data
     integral_table = G.graph_data.integral_table
 
@@ -55,34 +270,41 @@ function _3center_triplet(G, basis::BasisSet,
     TV = eltype(Wv)
 
     nnz = length(ii) + nat
-    vH  = Vector{SMatrix{NORB, NORB, TV, NORB*NORB}}(undef, nnz)
-    vS  = Vector{SMatrix{NORB, NORB, TV, NORB*NORB}}(undef, nnz)
 
-    # ---- onsite (serial: nat is small, usually 1-10 atoms) ----
+    vH = Vector{SMatrix{NORB,NORB,TV,NORB*NORB}}(undef, nnz)
+    vS = Vector{SMatrix{NORB,NORB,TV,NORB*NORB}}(undef, nnz)
+
+    # ---- onsite ----
     H_AO_on, S_AO_on = construct_integral(Wv, Wb, T_on, V_on, S_on)
+
     for i in 1:nat
         Hij, Sij = siteblock(H_AO_on, S_AO_on, ao_ranges, i, i)
-        vH[i] = SMatrix{NORB, NORB, TV}(Hij)
-        vS[i] = SMatrix{NORB, NORB, TV}(Sij)
+        vH[i] = SMatrix{NORB,NORB,TV}(Hij)
+        vS[i] = SMatrix{NORB,NORB,TV}(Sij)
     end
 
-    # ---- offsite (threaded over edges) ----
+    # ---- offsite ----
     nedges = length(ii)
+
     @threads for e in 1:nedges
         i  = ii[e]
         j  = jj[e]
         ed = edge_data[e]
 
         H_AO_off, S_AO_off = construct_integral(
-            Wv, Wb,
+            Wv,
+            Wb,
             _edge_T(ed, integral_table),
             _edge_V(ed, integral_table),
-            _edge_S(ed, integral_table))
+            _edge_S(ed, integral_table),
+        )
 
         Hij, Sij = siteblock(H_AO_off, S_AO_off, ao_ranges, i, j)
+
         idx = nat + e
-        vH[idx] = SMatrix{NORB, NORB, TV}(Hij)
-        vS[idx] = SMatrix{NORB, NORB, TV}(Sij)
+
+        vH[idx] = SMatrix{NORB,NORB,TV}(Hij)
+        vS[idx] = SMatrix{NORB,NORB,TV}(Sij)
     end
 
     return vH, vS
@@ -96,7 +318,12 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
                               basis::BasisSet,
                               Wv::AbstractVector,
                               Wb::AbstractMatrix)
-    ii, jj    = _get_ii_jj(G)
+    if _is_cut_graph(G)
+        return _3center_triplet_cut_rrule(G, basis, Wv, Wb)
+    end
+
+    ii, jj = _get_ii_jj(G)
+
     edge_data = G.edge_data
     integral_table = G.graph_data.integral_table
 
@@ -109,8 +336,8 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
     nedges = length(ii)
     nnz    = nedges + nat
 
-    vH = Vector{SMatrix{NORB, NORB, TV, NORB*NORB}}(undef, nnz)
-    vS = Vector{SMatrix{NORB, NORB, TV, NORB*NORB}}(undef, nnz)
+    vH = Vector{SMatrix{NORB,NORB,TV,NORB*NORB}}(undef, nnz)
+    vS = Vector{SMatrix{NORB,NORB,TV,NORB*NORB}}(undef, nnz)
 
     # Forward + store pullback closures
     (H_AO_on, S_AO_on), pb_on =
@@ -118,75 +345,93 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
 
     for i in 1:nat
         Hij, Sij = siteblock(H_AO_on, S_AO_on, ao_ranges, i, i)
-        vH[i] = SMatrix{NORB, NORB, TV}(Hij)
-        vS[i] = SMatrix{NORB, NORB, TV}(Sij)
+        vH[i] = SMatrix{NORB,NORB,TV}(Hij)
+        vS[i] = SMatrix{NORB,NORB,TV}(Sij)
     end
 
     pb_offs = Vector{Any}(undef, nedges)
+
     @threads for e in 1:nedges
         i  = ii[e]
         j  = jj[e]
         ed = edge_data[e]
 
         (H_AO_off, S_AO_off), pb_off =
-            ChainRulesCore.rrule(construct_integral,
-                                 Wv, Wb,
-                                 _edge_T(ed, integral_table),
-                                 _edge_V(ed, integral_table),
-                                 _edge_S(ed, integral_table))
+            ChainRulesCore.rrule(
+                construct_integral,
+                Wv,
+                Wb,
+                _edge_T(ed, integral_table),
+                _edge_V(ed, integral_table),
+                _edge_S(ed, integral_table),
+            )
+
         pb_offs[e] = pb_off
 
         Hij, Sij = siteblock(H_AO_off, S_AO_off, ao_ranges, i, j)
+
         idx = nat + e
-        vH[idx] = SMatrix{NORB, NORB, TV}(Hij)
-        vS[idx] = SMatrix{NORB, NORB, TV}(Sij)
+
+        vH[idx] = SMatrix{NORB,NORB,TV}(Hij)
+        vS[idx] = SMatrix{NORB,NORB,TV}(Sij)
     end
 
     function pullback(ΔΩ)
         ΔvH = unthunk(ΔΩ[1])
         ΔvS = unthunk(ΔΩ[2])
+
         TΔ  = eltype(eltype(ΔvH))
         N_AO = size(H_AO_on, 1)
 
         # ---- onsite adjoint scatter ----
         ΔH_on = zeros(TΔ, N_AO, N_AO)
         ΔS_on = zeros(TΔ, N_AO, N_AO)
+
         for i in 1:nat
             rows = ao_ranges[i]
+
             @inbounds for a in 1:NORB, b in 1:NORB
                 ΔH_on[rows[a], rows[b]] += ΔvH[i][a, b]
                 ΔS_on[rows[a], rows[b]] += ΔvS[i][a, b]
             end
         end
+
         _, Wv̄_on, Wb̄_on, _, _, _ = pb_on((ΔH_on, ΔS_on))
 
         # ---- thread-local accumulators ----
         nth = Threads.maxthreadid()
+
         Wv̄_tls = [zeros(TΔ, length(Wv̄_on)) for _ in 1:nth]
-        Wb̄_tls = [zeros(TΔ, size(Wb̄_on))   for _ in 1:nth]
+        Wb̄_tls = [zeros(TΔ, size(Wb̄_on)) for _ in 1:nth]
 
         @threads for e in 1:nedges
-            tid  = threadid()
-            i    = ii[e]
-            j    = jj[e]
-            idx  = nat + e
+            tid = threadid()
+
+            i = ii[e]
+            j = jj[e]
+
+            idx = nat + e
+
             rows = ao_ranges[i]
             cols = ao_ranges[j]
 
             ΔH_e = zeros(TΔ, N_AO, N_AO)
             ΔS_e = zeros(TΔ, N_AO, N_AO)
+
             @inbounds for a in 1:NORB, b in 1:NORB
                 ΔH_e[rows[a], cols[b]] += ΔvH[idx][a, b]
                 ΔS_e[rows[a], cols[b]] += ΔvS[idx][a, b]
             end
 
             _, Wv̄_e, Wb̄_e, _, _, _ = pb_offs[e]((ΔH_e, ΔS_e))
+
             Wv̄_tls[tid] .+= Wv̄_e
             Wb̄_tls[tid] .+= Wb̄_e
         end
 
         Wv̄ = copy(Wv̄_on)
         Wb̄ = copy(Wb̄_on)
+
         for t in 1:nth
             Wv̄ .+= Wv̄_tls[t]
             Wb̄ .+= Wb̄_tls[t]
@@ -198,13 +443,172 @@ function ChainRulesCore.rrule(::typeof(_3center_triplet),
     return (vH, vS), pullback
 end
 
+# ---------------------------------------------------------------------------
+# ChainRules pullback for cut graph version
+# ---------------------------------------------------------------------------
+function _3center_triplet_cut_rrule(G, basis::BasisSet,
+                                    Wv::AbstractVector,
+                                    Wb::AbstractMatrix)
+    vH, vS = _3center_triplet_cut(G, basis, Wv, Wb)
+
+    cut = G.graph_data.cut_integrals
+
+    T_off = cut.T_off
+    S_off = cut.S_off
+    V_off = cut.V_off
+
+    atom_species = _cut_atom_species(G, basis)
+
+    NORB, nat, orb_ranges, ao_ranges = _cut_ranges(G, Wv, Wb)
+
+    function pullback_cut(ΔΩ)
+        ΔvH = unthunk(ΔΩ[1])
+        ΔvS = unthunk(ΔΩ[2])
+
+        TΔ = eltype(eltype(ΔvH))
+
+        Wv̄ = zeros(TΔ, size(Wv))
+        Wb̄ = zeros(TΔ, size(Wb))
+
+        # -------------------------------------------------------------------
+        # Onsite adjoints
+        # -------------------------------------------------------------------
+        for i in 1:nat
+            ro = orb_ranges[i]
+            ao = ao_ranges[i]
+
+            Zi = atom_species[i]
+
+            Wbi = Wb[ro, ao]
+            Wvi = Wv[ao]
+
+            Tm = G.graph_data.T_on[Zi]
+            Vm = G.graph_data.V_on[Zi]
+            Sm = G.graph_data.S_on[Zi]
+
+            Vpair = _contract_v3(Vm, Wvi)
+            A = Tm + Vpair
+
+            ΔH = Matrix(ΔvH[i])
+            ΔS = Matrix(ΔvS[i])
+
+            Wb̄[ro, ao] .+= real.(
+                ΔH * Wbi * A' +
+                ΔH' * Wbi * A +
+                ΔS * Wbi * Sm' +
+                ΔS' * Wbi * Sm
+            )
+
+            ΔA = real.(Wbi' * ΔH * Wbi)
+
+            for c in axes(Vm, 3)
+                Wv̄[ao[c]] += sum(@view(Vm[:, :, c]) .* ΔA)
+            end
+        end
+
+        # -------------------------------------------------------------------
+        # T_off adjoints
+        # -------------------------------------------------------------------
+        offset = nat
+
+        for e in eachindex(T_off)
+            ed = T_off[e]
+
+            i, j = ed.integral_idx
+
+            ri, rj = orb_ranges[i], orb_ranges[j]
+            ai, aj = ao_ranges[i], ao_ranges[j]
+
+            Wbi, Wbj = Wb[ri, ai], Wb[rj, aj]
+
+            A = ed.w .* ed.V2
+
+            ΔH = Matrix(ΔvH[offset + e])
+
+            Wb̄[ri, ai] .+= real.(ΔH * Wbj * A')
+            Wb̄[rj, aj] .+= real.(ΔH' * Wbi * A)
+        end
+
+        # -------------------------------------------------------------------
+        # S_off adjoints
+        # -------------------------------------------------------------------
+        offset += length(T_off)
+
+        for e in eachindex(S_off)
+            ed = S_off[e]
+
+            i, j = ed.integral_idx
+
+            ri, rj = orb_ranges[i], orb_ranges[j]
+            ai, aj = ao_ranges[i], ao_ranges[j]
+
+            Wbi, Wbj = Wb[ri, ai], Wb[rj, aj]
+
+            A = ed.w .* ed.V2
+
+            ΔS = Matrix(ΔvS[offset + e])
+
+            Wb̄[ri, ai] .+= real.(ΔS * Wbj * A')
+            Wb̄[rj, aj] .+= real.(ΔS' * Wbi * A)
+        end
+
+        # -------------------------------------------------------------------
+        # V_off adjoints
+        #
+        # Convention:
+        #   ed.integral_idx = (i, p, j)
+        #   V3[a,b,c] = ∫ φ_i[a] φ_p[b] φ_j[c]
+        #   A[a,c]    = Σ_b V3[a,b,c] Wv_p[b]
+        # -------------------------------------------------------------------
+        offset += length(S_off)
+
+        for e in eachindex(V_off)
+            ed = V_off[e]
+
+            i, p, j = ed.integral_idx
+
+            ri, rj = orb_ranges[i], orb_ranges[j]
+            ai, ap, aj = ao_ranges[i], ao_ranges[p], ao_ranges[j]
+
+            Wbi, Wbj = Wb[ri, ai], Wb[rj, aj]
+
+            V3 = ed.V3
+
+            A = ed.w .* _contract_v3_dim2(V3, Wv[ap])
+
+            ΔH = Matrix(ΔvH[offset + e])
+
+            Wb̄[ri, ai] .+= real.(ΔH * Wbj * A')
+            Wb̄[rj, aj] .+= real.(ΔH' * Wbi * A)
+
+            ΔA = real.(Wbi' * ΔH * Wbj) .* ed.w
+
+            @inbounds for b in axes(V3, 2)
+                Wv̄[ap[b]] += sum(@view(V3[:, b, :]) .* ΔA)
+            end
+        end
+
+        return NoTangent(), NoTangent(), NoTangent(), Wv̄, Wb̄
+    end
+
+    return (vH, vS), pullback_cut
+end
+
+# ---------------------------------------------------------------------------
+# GPU path for original non-cut graph
+# ---------------------------------------------------------------------------
+
 using CUDA
 using GaussianBasis
 
 function _copy_siteblock_kernel!(
-    vH, vS,
-    Hfull, Sfull,
-    i::Int, j::Int, idx::Int,
+    vH,
+    vS,
+    Hfull,
+    Sfull,
+    i::Int,
+    j::Int,
+    idx::Int,
     NORB::Int,
 )
     q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -241,6 +645,7 @@ function _3center_triplet(
     NORB = cache.NORB
 
     TV = eltype(Wv)
+
     nedges = length(ii)
     nblocks = nat + nedges
 
@@ -261,14 +666,18 @@ function _3center_triplet(
 
     for i in 1:nat
         @cuda threads=threads blocks=blocks _copy_siteblock_kernel!(
-            vH, vS,
-            H_AO_on, S_AO_on,
-            i, i, i,
+            vH,
+            vS,
+            H_AO_on,
+            S_AO_on,
+            i,
+            i,
+            i,
             NORB,
         )
     end
 
-    # offsite: use cache.T_pair/V_pair/S_pair, not edge_data/integral_table
+    # offsite: use cache.T_pair/V_pair/S_pair
     for e in 1:nedges
         i = ii[e]
         j = jj[e]
@@ -284,16 +693,19 @@ function _3center_triplet(
         idx = nat + e
 
         @cuda threads=threads blocks=blocks _copy_siteblock_kernel!(
-            vH, vS,
-            H_AO_off, S_AO_off,
-            i, j, idx,
+            vH,
+            vS,
+            H_AO_off,
+            S_AO_off,
+            i,
+            j,
+            idx,
             NORB,
         )
     end
 
     return vH, vS
 end
-
 
 using CUDA
 using ChainRulesCore
@@ -342,6 +754,7 @@ function ChainRulesCore.rrule(
 
     nat = cache.nat
     NORB = cache.NORB
+
     nedges = length(ii)
     nblocks = nat + nedges
     dim = nat * NORB
@@ -482,6 +895,9 @@ function ChainRulesCore.rrule(
     return (vH, vS), pullback_3center_gpu
 end
 
+# ---------------------------------------------------------------------------
+# Generalized eigenvalue helpers
+# ---------------------------------------------------------------------------
 
 function generate_λ_and_vecs(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
     L  = cholesky(S).L
@@ -493,7 +909,8 @@ function generate_λ_and_vecs(H::Matrix{T}, S::Matrix{TS}) where {T, TS}
     return λ, V
 end
 
-function generate_λ_and_vecs(Hlist::AbstractVector{TH}, Slist::AbstractVector{TS}) where {TH, TS}
+function generate_λ_and_vecs(Hlist::AbstractVector{TH},
+                             Slist::AbstractVector{TS}) where {TH, TS}
     results = [generate_λ_and_vecs(Hlist[i], Slist[i]) for i in 1:length(Hlist)]
     λlist = [r[1] for r in results]
     Vlist = [r[2] for r in results]

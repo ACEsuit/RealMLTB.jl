@@ -1,3 +1,10 @@
+import EquivariantTensors: PState
+using EquivariantTensors
+
+function nlist2graph_cut(bs::BasisSet, nlist, sys, klist; kwargs...)
+    return nlist2graph_cut(bs.name, nlist, sys, klist; kwargs...)
+end
+
 function nlist2graph_cut(bs_name, nlist, sys, klist; 
                          ρcuts=1:0.2:nlist.cutoff, 
                          cutoff=1e-6)
@@ -117,16 +124,17 @@ function nlist2graph_cut(bs_name, nlist, sys, klist;
 
         ntasks = length(tasks)
         println("Total 3-center tasks after distance pre-cut: $ntasks")
+        flush(stdout)
 
-        nthreads = Threads.nthreads()
-        v_buf = [Array{Float64,3}[] for _ in 1:nthreads]
-        z_buf = [Tuple{ChemicalSpecies,ChemicalSpecies,ChemicalSpecies}[] for _ in 1:nthreads]
-        idx_buf = [Tuple{Int,Int,Int}[] for _ in 1:nthreads]
-        rvec_buf = [Tuple{SVector,SVector}[] for _ in 1:nthreads]
-        rcell_idx_buf = [Int[] for _ in 1:nthreads]
+         RType = typeof(Rvec_list[1])
 
+        Vlist       = Vector{Array{Float64,3}}(undef, ntasks)
+        zlist       = Vector{Tuple{ChemicalSpecies,ChemicalSpecies,ChemicalSpecies}}(undef, ntasks)
+        triplet_idx = Vector{Tuple{Int,Int,Int}}(undef, ntasks)
+        Rvec_pairs  = Vector{Tuple{RType,RType}}(undef, ntasks)
+
+        Rcell_idx = fill(0, ntasks)
 		Threads.@threads for t in 1:ntasks
-        	tid = Threads.threadid()
         	i, idx_j, idx_k = tasks[t]
 
             eli, elj, elk = atom_species[i], z1_list[idx_j], z1_list[idx_k]
@@ -140,19 +148,13 @@ function nlist2graph_cut(bs_name, nlist, sys, klist;
             V_sph = v3c_spherical_AO_integrals(V_cart,
                 cart2sph_list[eli], cart2sph_list[elj], cart2sph_list[elk],
                 Scart_list[eli], Scart_list[elj], Scart_list[elk])
+            Vlist[t]       = V_sph
+            zlist[t]       = (eli, elj, elk)
+            triplet_idx[t] = (i, jj[idx_j], jj[idx_k])
+            Rvec_pairs[t]  = (Rij, Rik)
 
-            push!(v_buf[tid], V_sph)
-            push!(z_buf[tid], (eli, elj, elk))
-            push!(idx_buf[tid], (i, jj[idx_j], jj[idx_k]))
-            push!(rvec_buf[tid], (Rij, Rik))
-            push!(rcell_idx_buf[tid], idx_k)
+            Rcell_idx[t] = idx_k
         end
-
-        Vlist = vcat(v_buf...)
-        zlist = vcat(z_buf...)
-        triplet_idx = vcat(idx_buf...)
-        Rvec_pairs = vcat(rvec_buf...)
-        Rcell_idx = vcat(rcell_idx_buf...)
 
         dist_3c_list = cal_dist_3c(Rvec_pairs)
         errs = [cal_err(Vlist, dist_3c_list, ρcut) for ρcut in ρcuts]
@@ -178,18 +180,33 @@ function nlist2graph_cut(bs_name, nlist, sys, klist;
     
     klist_phys = physical_k.(Ref(sys), klist)
 
+    edge_data = [
+        PState(
+            R_cell = Rcell_list[e],
+            𝐫      = Rvec_list[e],
+            z0     = z0_list[e],
+            z1     = z1_list[e],
+        )
+        for e in 1:npairs
+    ]
+
     G = EquivariantTensors.ETGraph(
         ii, jj;
-        edge_data=(
-			T_off = edge_T_data,
-        	S_off = edge_S_data,
-        	V_off = edge_V_data,
-		),
-        graph_data=(
-            klist=klist_phys,
-            T_on=T_on,
-            V_on=V_on,
-            S_on=S_on,
+        edge_data = edge_data,
+        graph_data = (
+            klist = klist_phys,
+
+            T_on = T_on,
+            V_on = V_on,
+            S_on = S_on,
+
+            atom_species = species.(sys.particles),
+
+            cut_integrals = (
+                T_off = edge_T_data,
+                S_off = edge_S_data,
+                V_off = edge_V_data,
+            ),
         ),
     )
 
