@@ -317,8 +317,10 @@ function _train_level(G, λ_ref, model, ps, st, keep_bands;
     H_iterations,
     train_part::Symbol = :all,
     H_train_part::Symbol = train_part,
+    initial_invH = nothing,
+    check_overlap::Symbol = :error,
 )
-    ps_opt, history = train(
+    ps_opt, history, invH = train(
         G,
         model,
         ps,
@@ -337,9 +339,11 @@ function _train_level(G, λ_ref, model, ps, st, keep_bands;
         kweights = kweights,
         filter = filter,
         H_iterations = H_iterations,
+        initial_invH = initial_invH,
+        check_overlap = check_overlap,
     )
 
-    return ps_opt, history
+    return ps_opt, history, invH
 end
 
 function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st;
@@ -347,7 +351,14 @@ function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st
     cone_w::Float64,
     filter_σ::Float64,
     train_part::Symbol = :all,
+    initial_invH = nothing,
+    check_overlap::Symbol = :error,
 )
+    # this path calls _bfgs_refine directly rather than going through train(),
+    # so it needs its own pre-flight
+    check_overlap_pd(model, G, ps, st; mode = check_overlap,
+                     label = "  [_train_level_H] ")
+
     loss_H(p) = RMSE_H(
         G,
         λ_ref,
@@ -362,14 +373,15 @@ function _train_level_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st
         filter_σ = filter_σ,
     )
 
-    ps_opt, history, _ = _bfgs_refine(
+    ps_opt, history, _, invH = _bfgs_refine(
         loss_H,
         ps;
         iterations = H_iterations,
         train_part = train_part,
+        initial_invH = initial_invH,
     )
 
-    return ps_opt, history
+    return ps_opt, history, invH
 end
 
 function _report_level_done(verbose, i, G, λ_ref, model, ps, st, keep_bands,
@@ -438,6 +450,9 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     filter = nothing,
     H_iterations::Int = 500,
     prepare_ps_st = (ps, st) -> (ps, st),
+
+    # pre-flight overlap check, forwarded to every level: :error, :warn, :off
+    check_overlap::Symbol = :error,
 )
     rng = MersenneTwister()
     ladder = generate_ladder(target_Dtot, target_maxl, target_ORD)
@@ -465,6 +480,12 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
     current_model = nothing
     current_ps = nothing
     current_st = nothing
+
+    # Curvature carried from the previous level.  The ladder changes the
+    # parameter dimension whenever Dtot/maxl/ORD change, and _bfgs_refine then
+    # drops it with a printed note -- so this pays at the level boundaries
+    # where the dimension happens to be unchanged, and is a no-op elsewhere.
+    level_invH = nothing
 
     n_levels = length(ladder)
 
@@ -505,7 +526,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
             "$adam_iterations Adam steps, train_part=$train_part, H_train_part=$H_train_part"
         )
 
-        current_ps, _ = _train_level(
+        current_ps, _, level_invH = _train_level(
             G,
             λ_ref,
             current_model,
@@ -517,6 +538,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
             adam_lr = adam_lr,
             grad_clip = grad_clip,
             adam_patience = adam_patience,
+            check_overlap = check_overlap,
             ψ_ref = ψ_ref,
             proj = proj,
             kweights = kweights,
@@ -524,6 +546,7 @@ function multilevel_train(G, λ_ref, bs, NORB, rcut;
             H_iterations = H_iterations,
             train_part = train_part,
             H_train_part = H_train_part,
+            initial_invH = level_invH,
         )
 
         _report_level_done(
@@ -575,6 +598,9 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     #   :potential
     #   :basis
     train_part::Symbol = :all,
+
+    # pre-flight overlap check, forwarded to every level: :error, :warn, :off
+    check_overlap::Symbol = :error,
 )
     rng = MersenneTwister()
     ladder = generate_ladder(target_Dtot, target_maxl, target_ORD)
@@ -600,6 +626,12 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
     current_model = nothing
     current_ps = nothing
     current_st = nothing
+
+    # Curvature carried from the previous level.  The ladder changes the
+    # parameter dimension whenever Dtot/maxl/ORD change, and _bfgs_refine then
+    # drops it with a printed note -- so this pays at the level boundaries
+    # where the dimension happens to be unchanged, and is a no-op elsewhere.
+    level_invH = nothing
 
     n_levels = length(ladder)
 
@@ -637,7 +669,7 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
 
         verbose && println("    Training: $H_iterations BFGS steps on RMSE_H, train_part=$train_part")
 
-        current_ps, _ = _train_level_H(
+        current_ps, _, level_invH = _train_level_H(
             G,
             λ_ref,
             ψ_ref,
@@ -651,6 +683,8 @@ function multilevel_train_H(G, λ_ref, ψ_ref, proj, kweights, bs, NORB, rcut;
             cone_w = cone_w,
             filter_σ = filter_σ,
             train_part = train_part,
+            initial_invH = level_invH,
+            check_overlap = check_overlap,
         )
 
         _report_level_done(

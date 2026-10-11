@@ -1,9 +1,12 @@
 using Test
+using RealMLTB
 using FastGaussQuadrature
 using LinearAlgebra
 using Molecules
 using GaussianBasis
 import GaussianBasis: num_basis
+import GaussianBasis: Acsint
+const ang2bohr = Acsint.ang2bohr   # used by def_V_triple! below, was never imported
 
 function def_EPI_1e3c(BS::BasisSet)
    out = zeros(BS.nbas, BS.nbas, BS.nbas)
@@ -118,7 +121,7 @@ bs2 = BasisSet("sto-3g", atoms, spherical=false, lib=:acsint)
       Nmax = maximum(num_basis.(BS.basis))
       out = zeros(Nmax^3)
       ref = similar(out)
-      ijk = find_unique_ijk(BS.nshells)
+      ijk = RealMLTB.find_unique_ijk(BS.nshells)   # not exported
       for (i,j,k) in ijk
          generate_V_triple!(out, BS, i, j, k)
          def_V_triple!(ref, BS, i, j, k)

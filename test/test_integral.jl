@@ -3,6 +3,7 @@ using GaussianBasis
 using Molecules
 using LinearAlgebra
 using Random
+using Test
 
 function main()
     atoms = [
@@ -19,6 +20,8 @@ function main()
     println("\n--- T / S comparison ---")
     println("max|ΔT| = ", maximum(abs, T_dense - T_sparse))
     println("max|ΔS| = ", maximum(abs, S_dense - S_sparse))
+    @test maximum(abs, T_dense - T_sparse) < 1e-12
+    @test maximum(abs, S_dense - S_sparse) < 1e-12
 
     # --- V comparison: expand the dense version into sparse format, then compare ---
     println("\n--- V comparison ---")
@@ -69,6 +72,9 @@ function main()
     println("max|ΔV| (element-wise) = ", max_err)
     println("Elements in dense missing from sparse: ", missing_in_sparse)
     println("Extra elements in sparse not in dense: ", extra_in_sparse)
+    @test max_err <= cutoff
+    @test missing_in_sparse == 0
+    @test extra_in_sparse == 0
 
     # --- Contraction equivalence: contract V against a random vector and compare ---
     println("\n--- Contraction equivalence ---")
@@ -85,8 +91,11 @@ function main()
     end
 
     println("max|ΔM| (contracted matrix) = ", maximum(abs, M_dense - M_sparse))
+    @test maximum(abs, M_dense - M_sparse) < 1e-10
 
     println("\n=== All comparisons done ===")
 end
 
-main()
+@testset "dense vs sparse spherical AO integrals" begin
+    main()
+end

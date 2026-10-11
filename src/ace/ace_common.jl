@@ -48,7 +48,8 @@ function ace_make_embed(rcut; Dtot::Int = 9, maxl::Int = 5)
     ybas     = P4ML.real_sphericalharmonics(maxl; T = Float32, static = true)
     Ylm_spec = P4ML.natural_indices(ybas)
 
-    rcut_ang = ustrip(u"Å", rcut)
+    # rcut may be unitful or a plain number; a plain number is read as Å.
+    rcut_ang = rcut isa Real ? Float64(rcut) : ustrip(u"Å", rcut)
 
     env(y) = (y - 1)^2 * (y + 1)^2
 

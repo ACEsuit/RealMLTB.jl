@@ -424,87 +424,14 @@ function make_3center_gpu_cache(G, NORB::Int; T = Float32)
     )
 end
 
-# ---------------------------------------------------------------------------
-# GPU sparse contraction: V_pair[a,b] += vals[n] * Wv[c]
-# ---------------------------------------------------------------------------
-function _sparse_contract_gpu_kernel!(V_pair, ia, ib, ic, vals, Wv, nnz::Int)
-    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-
-    if q <= nnz
-        a = Int(ia[q])
-        b = Int(ib[q])
-        c = Int(ic[q])
-
-        CUDA.@atomic V_pair[a, b] += vals[q] * Wv[c]
-    end
-
-    return nothing
-end
-
-function _sparse_contract_gpu(Vraw::Sparse3CGPU, Wv::CUDA.CuArray{<:Real,1}, nbas::Int)
-    V_pair = CUDA.zeros(eltype(Wv), nbas, nbas)
-
-    nnz = length(Vraw.vals)
-    threads = 256
-    blocks = cld(nnz, threads)
-
-    @cuda threads=threads blocks=blocks _sparse_contract_gpu_kernel!(
-        V_pair,
-        Vraw.ia,
-        Vraw.ib,
-        Vraw.ic,
-        Vraw.vals,
-        Wv,
-        nnz,
-    )
-
-    return V_pair
-end
-
-function _sparse_contract_pullback_gpu_kernel!(Wvbar, ia, ib, ic, vals, ΔA, nnz::Int)
-    q = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-
-    if q <= nnz
-        a = Int(ia[q])
-        b = Int(ib[q])
-        c = Int(ic[q])
-
-        CUDA.@atomic Wvbar[c] += vals[q] * ΔA[a, b]
-    end
-
-    return nothing
-end
-
-function _sparse_contract_pullback_gpu(
-    Vraw::Sparse3CGPU,
-    ΔA::CUDA.CuArray{<:Real,2},
-    nwv::Int,
-)
-    Wvbar = CUDA.zeros(eltype(ΔA), nwv)
-
-    nnz = length(Vraw.vals)
-    threads = 256
-    blocks = cld(nnz, threads)
-
-    @cuda threads=threads blocks=blocks _sparse_contract_pullback_gpu_kernel!(
-        Wvbar,
-        Vraw.ia,
-        Vraw.ib,
-        Vraw.ic,
-        Vraw.vals,
-        ΔA,
-        nnz,
-    )
-
-    return Wvbar
-end
-
+# NOTE: the GPU sparse-contraction kernels (_sparse_contract_gpu[_kernel!],
+# _sparse_contract_pullback_gpu[_kernel!]) used to be defined here AND again
+# in utils/construct_integral.jl, which is included later and therefore won
+# at run time.  Defining the same signature twice makes Julia refuse to
+# precompile the package, so the (shadowed) copies were removed from here;
+# the live definitions are the ones in utils/construct_integral.jl.
 @inline function _named_field(field::Symbol, value)
     return NamedTuple{(field,)}((value,))
-end
-
-function _named_field(name::Symbol, value)
-    return NamedTuple{(name,)}((value,))
 end
 
 function _replace_graph_data_preserve_storage(G_gpu, new_graph_data)

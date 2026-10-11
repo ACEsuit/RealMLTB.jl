@@ -237,23 +237,45 @@ end
 # 2) ACEv3Center
 #    Wv from equivariant ACE model; Wb_atom is a plain parameter.
 # ---------------------------------------------------------------------------
-struct ACEv3Center{M, B, NORB, NBAS, NATOM} <: Lux.AbstractLuxLayer
+# `wb_n_out = nothing` keeps the dense Wb.  A tuple (n_0, n_1, ...) switches
+# to the multiplet parameterisation: one coefficient per (l, shell), shared by
+# all 2l+1 m components, so the row space of Wb is invariant under the AO
+# Wigner rotation and the output eigenvalues are rotation invariant.  See
+# src/model/wb_multiplet.jl.  On 2-atom Si a general rotation moves the Gamma
+# eigenvalues by tens of eV with a dense Wb, against ~1e-11 eV here.
+struct ACEv3Center{M, B, NORB, NBAS, NATOM, NO} <: Lux.AbstractLuxLayer
     ace_model::M
     basisset::B
+    wb_n_out::NO
 end
 
-function ACEv3Center(ace_model, bs, NORB::Int)
+function ACEv3Center(ace_model, bs, NORB::Int; wb_n_out = nothing)
     NBAS  = bs.nbas
     NATOM = bs.natoms
-    return ACEv3Center{typeof(ace_model), typeof(bs), NORB, NBAS, NATOM}(ace_model, bs)
+    if wb_n_out !== nothing
+        norb_mult = wb_multiplet_norb(bs, wb_n_out)
+        NORB == norb_mult || error(
+            "wb_n_out = $wb_n_out gives NORB = $norb_mult (Σ_l n_out[l+1](2l+1)), " *
+            "not the $NORB that was asked for.  NORB is quantised by multiplet.")
+    end
+    return ACEv3Center{typeof(ace_model), typeof(bs), NORB, NBAS, NATOM,
+                       typeof(wb_n_out)}(ace_model, bs, wb_n_out)
 end
 
 function LuxCore.initialparameters(rng::AbstractRNG,
-                                   l::ACEv3Center{M,B,NORB,NBAS,NATOM}) where {M,B,NORB,NBAS,NATOM}
-    ps_ace  = LuxCore.initialparameters(rng, l.ace_model) |> EquivariantTensors.float32
-    Nb      = div(NBAS, NATOM)
-    Wb_atom = Lux.glorot_normal(rng, Float64, NORB, Nb)
-    return (ace=ps_ace, Wb=Wb_atom)
+                                   l::ACEv3Center{M,B,NORB,NBAS,NATOM,NO}) where {M,B,NORB,NBAS,NATOM,NO}
+    ps_ace = LuxCore.initialparameters(rng, l.ace_model) |> EquivariantTensors.float32
+
+    if l.wb_n_out === nothing
+        Nb = div(NBAS, NATOM)
+        return (ace=ps_ace, Wb=Lux.glorot_normal(rng, Float64, NORB, Nb))
+    end
+
+    _, _, _, shells_by_l = wb_multiplet_layout(l.basisset)
+    C = tuple((Lux.glorot_normal(rng, Float64, l.wb_n_out[li],
+                                 length(shells_by_l[li]))
+               for li in eachindex(l.wb_n_out) if l.wb_n_out[li] > 0)...)
+    return (ace=ps_ace, Wb=C)
 end
 
 function LuxCore.initialstates(rng::AbstractRNG, l::ACEv3Center)
@@ -261,12 +283,14 @@ function LuxCore.initialstates(rng::AbstractRNG, l::ACEv3Center)
     return (ace=st_ace, basisset=l.basisset)
 end
 
-function (l::ACEv3Center{M,B,NORB,NBAS,NATOM})(G, ps, st) where {M,B,NORB,NBAS,NATOM}
+function (l::ACEv3Center{M,B,NORB,NBAS,NATOM,NO})(G, ps, st) where {M,B,NORB,NBAS,NATOM,NO}
     val_tuple, st_ace = _ace_Wv_forward(l.ace_model, G, ps.ace, st.ace)
     Wv = assemble_Wv(val_tuple)
     # use actual atom count from G, not the fixed NATOM type parameter
     natom_actual = EquivariantTensors.nnodes(G)
-    Wb = kron_I_atoms(natom_actual, ps.Wb)
+    Wb_atom = l.wb_n_out === nothing ? ps.Wb :
+              assemble_Wb_multiplet(ps.Wb, st.basisset, l.wb_n_out)
+    Wb = kron_I_atoms(natom_actual, Wb_atom)
     vH, vS = _3center_triplet(G, st.basisset, Wv, Wb)
     new_st = (ace=st_ace, basisset=st.basisset)
     return (G, vH, vS, Wb), ps, new_st

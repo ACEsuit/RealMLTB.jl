@@ -4,7 +4,7 @@ using ChainRulesCore
 using Zygote
 using Optimisers: destructure
 
-export FermiFilter, RMSE, RMSE_H
+export FermiFilter, RMSE, RMSE_H, band_gauge_report
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,10 +39,94 @@ end
 end
 
 # ---------------------------------------------------------------------------
+# Gauge handling for eigenvalue losses
+#
+# A band fit is determined only up to the absolute energy zero of the
+# reference calculation (G = 0 convention, pseudopotential reference, ...).
+# Three ways to take the difference λ_pred - λ_ref:
+#
+#   :absolute   no shift at all.
+#   :global     ONE scalar for the whole structure, shared by every k point
+#               and every band.  This is the "one global shift" judge.
+#   :perk       a separate scalar for each k point.  DIAGNOSTIC ONLY: it
+#               discards the k-to-k alignment, which is physical information,
+#               and will report an error that no single Hamiltonian can
+#               actually achieve.
+#
+# With  res[k][n] = λ_pred[k][n] - λ_ref[k][n],
+#       c_k       = -mean_n res[k][n]            (per-k optimal shift)
+#       c̄        = Σ_k (w_k/W) c_k              (W = Σ_k w_k n_k)
+#
+#       L_global^2 = L_perk^2 + L_disp ,
+#       L_disp     = Σ_k (w_k n_k / W) (c_k - c̄)^2 .
+#
+# L_disp is the gauge dispersion: how much of the "one global shift" error is
+# nothing but a k-dependent rigid offset.  Report it next to L_global, never
+# report L_perk on its own.
+# ---------------------------------------------------------------------------
+
+const GAUGES = (:absolute, :global, :perk)
+
+@inline _nband(r) = length(r)
+
+"""
+    _uniform_weights(res) -> Vector{Float64}
+
+Default k weights: uniform, so that the weighted formulas below reduce
+exactly to the plain (unweighted) RMSE.
+"""
+_uniform_weights(res) = ones(Float64, length(res))
+
+"""
+    _global_shift(res, w) -> c
+
+The single scalar c minimising Σ_k w_k Σ_n (res[k][n] + c)^2, i.e. minus the
+w-weighted mean of all residuals.  Differentiable (no mutation).
+"""
+function _global_shift(res, w)
+    num = sum(w .* map(sum, res))
+    den = sum(w .* map(_nband, res))
+    return -num / den
+end
+
+"""
+    _perk_shifts(res) -> Vector
+
+c_k = -mean_n res[k][n].
+"""
+_perk_shifts(res) = map(r -> -sum(r) / _nband(r), res)
+
+"""
+    _apply_gauge(res, w, gauge) -> res'
+
+Return the gauge-reduced residuals.  `:absolute` is the identity.
+"""
+function _apply_gauge(res, w, gauge::Symbol)
+    gauge === :absolute && return res
+    if gauge === :global
+        c = _global_shift(res, w)
+        return map(r -> r .+ c, res)
+    elseif gauge === :perk
+        return map(r -> r .- (sum(r) / _nband(r)), res)
+    end
+    error("unknown gauge $gauge; expected one of $GAUGES")
+end
+
+"""
+    _weighted_rmse(res, w) -> sqrt( Σ_k w_k Σ_n res[k][n]^2 / Σ_k w_k n_k )
+"""
+function _weighted_rmse(res, w)
+    sq = sum(w .* map(r -> sum(abs2, r), res))
+    n  = sum(w .* map(_nband, res))
+    return sqrt(sq / n)
+end
+
+# ---------------------------------------------------------------------------
 # Eigenvalue RMSE
 # ---------------------------------------------------------------------------
 
-function RMSE(G, λ_ref, model, ps, st; keep_bands::Int = 4)
+function RMSE(G, λ_ref, model, ps, st; keep_bands::Int = 4,
+              gauge::Symbol = :global, kweights = nothing)
     result = model(G, ps, st)
     out = result[1]
     λ_pred = out.λ
@@ -51,19 +135,26 @@ function RMSE(G, λ_ref, model, ps, st; keep_bands::Int = 4)
         return eltype(first(λ_pred))(1e6)
     end
 
-    λ_pred_keep = getindex.(λ_pred, Ref(1:keep_bands))
-    λ_ref_keep = getindex.(λ_ref, Ref(1:keep_bands))
-    sq_diff = sum(v -> sum(abs2, v), λ_pred_keep .- λ_ref_keep)
-    n_total = length(λ_pred) * keep_bands
-    return sqrt(sq_diff / n_total)
+    @assert length(λ_pred) == length(λ_ref)
+
+    res = [λ_pred[ik][1:keep_bands] .- λ_ref[ik][1:keep_bands]
+           for ik in eachindex(λ_pred)]
+    w   = isnothing(kweights) ? _uniform_weights(res) : collect(kweights)
+
+    return _weighted_rmse(_apply_gauge(res, w, gauge), w)
 end
 
+# NOTE on the list version: the :global shift is fitted ONE PER STRUCTURE.
+# Each reference calculation carries its own arbitrary energy zero, so a
+# single shift shared across structures would mix a physical quantity
+# (structure-to-structure level alignment) into the gauge.
 function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
-              model, ps, st; keep_bands::Int = 4)
+              model, ps, st; keep_bands::Int = 4,
+              gauge::Symbol = :global, kweights_list = nothing)
     @assert length(Glist) == length(λ_ref_list)
 
     total_sq = 0.0
-    total_n  = 0
+    total_n  = 0.0
 
     for i in eachindex(Glist)
         result = model(Glist[i], ps, st)
@@ -74,14 +165,70 @@ function RMSE(Glist::AbstractVector, λ_ref_list::AbstractVector,
             return eltype(first(λ_pred))(1e6)
         end
 
-        λ_pred_keep = getindex.(λ_pred, Ref(1:keep_bands))
-        λ_ref_keep = getindex.(λ_ref_list[i], Ref(1:keep_bands))
-        diff        = λ_pred_keep .- λ_ref_keep
-        total_sq   += sum(v -> sum(abs2, v), diff)
-        total_n    += length(diff) * keep_bands
+        @assert length(λ_pred) == length(λ_ref_list[i])
+
+        res = [λ_pred[ik][1:keep_bands] .- λ_ref_list[i][ik][1:keep_bands]
+               for ik in eachindex(λ_pred)]
+        w   = isnothing(kweights_list) ? _uniform_weights(res) :
+                                         collect(kweights_list[i])
+
+        res_g     = _apply_gauge(res, w, gauge)
+        total_sq += sum(w .* map(r -> sum(abs2, r), res_g))
+        total_n  += sum(w .* map(_nband, res_g))
     end
 
     return sqrt(total_sq / total_n)
+end
+
+# ---------------------------------------------------------------------------
+# Gauge decomposition of a band error (diagnostics / reporting)
+# ---------------------------------------------------------------------------
+
+"""
+    band_gauge_report(λ_pred, λ_ref; keep_bands = 4, kweights = nothing)
+
+Decompose the band error of ONE structure into its gauge components.
+
+Returns a NamedTuple with
+
+    L_abs     no shift                         (strictest)
+    L_global  one global shift, all k and all bands share it  <- quote this
+    L_perk    one shift per k point            (diagnostic only)
+    L_disp    L_global^2 - L_perk^2, the gauge dispersion
+    misgauge  L_abs^2 - L_global^2 == c_global^2
+    c_global  the fitted global shift
+    c_k       the per-k shifts
+
+Exact identities, both asserted here:
+
+    L_abs^2    == L_global^2 + c_global^2
+    L_global^2 == L_perk^2   + L_disp
+
+`L_perk` is never a defensible number on its own: it is the error of a
+Hamiltonian that is allowed a different energy zero at every k point, which
+no single Hamiltonian is.  Report `L_global` and `L_disp` together.
+"""
+function band_gauge_report(λ_pred, λ_ref; keep_bands::Int = 4, kweights = nothing)
+    res = [λ_pred[ik][1:keep_bands] .- λ_ref[ik][1:keep_bands]
+           for ik in eachindex(λ_pred)]
+    w   = isnothing(kweights) ? _uniform_weights(res) : collect(kweights)
+
+    W = sum(w .* map(_nband, res))
+
+    c_global = _global_shift(res, w)
+    c_k      = _perk_shifts(res)
+
+    L_abs    = _weighted_rmse(res, w)
+    L_global = _weighted_rmse(_apply_gauge(res, w, :global), w)
+    L_perk   = _weighted_rmse(_apply_gauge(res, w, :perk), w)
+
+    L_disp = sum(w .* map(_nband, res) .* (c_k .- c_global) .^ 2) / W
+
+    @assert isapprox(L_abs^2, L_global^2 + c_global^2; rtol = 1e-10, atol = 1e-18)
+    @assert isapprox(L_global^2, L_perk^2 + L_disp;    rtol = 1e-10, atol = 1e-18)
+
+    return (; L_abs, L_global, L_perk, L_disp,
+              misgauge = c_global^2, c_global, c_k)
 end
 
 # ---------------------------------------------------------------------------
@@ -96,7 +243,9 @@ function RMSE_H(Glist::AbstractVector,
                 filter_list::AbstractVector,
                 model, ps, st;
                 cone_w = 1.0,
-                filter_σ = 0.5)
+                filter_σ = 0.5,
+                cone_gauge::Symbol = :global,
+                n_occ = nothing)
 
     n = length(Glist)
     @assert length(λ_ref_list)  == n
@@ -116,7 +265,9 @@ function RMSE_H(Glist::AbstractVector,
                         filter_list[i],
                         model, ps, st;
                         cone_w,
-                        filter_σ)
+                        filter_σ,
+                        cone_gauge,
+                        n_occ)
     end
 
     return sqrt(total / n)
@@ -147,9 +298,21 @@ end
 # Hamiltonian RMSE (single structure)
 # ---------------------------------------------------------------------------
 
+# `cone_gauge` controls how the high-symmetry / cone eigenvalues are compared:
+#   :global   one shift shared by every cone k point and every cone band
+#   :absolute no shift
+#   :perk     one shift per k point -- diagnostic only, do not train on it
+#
+# Note the interaction with the Δop term below: that term is gauge sensitive
+# through `filter.(real.(λ))`, whose μ is the *absolute* DFT εF.  So with
+# `cone_gauge = :global` the absolute energy zero is pinned by the occupied
+# subspace term alone, which is the physically meaningful constraint, while
+# the band shapes are judged shift-free.
 function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st;
                 cone_w = 1.0,
-                filter_σ = 0.5)
+                filter_σ = 0.5,
+                cone_gauge::Symbol = :global,
+                n_occ = nothing)
 
     result = model(G, ps, st)
     out    = result[1]
@@ -198,15 +361,47 @@ function RMSE_H(G, λ_ref, ψ_ref, proj, kweights, filter, model, ps, st;
     Δcone = 0.0
 
     if cone_w > 0
-        kpw = findlast(x -> x <= 0, λ_ref[1] .- filter.μ)
         ktb = div(size(Wb, 1), 2)
-
         nbands = min(3, ktb)
+
+        # kpw is the index of the highest band at or below μ.  Two things were
+        # wrong here.  (1) findlast returns nothing when every band at that k
+        # lies above μ, and kpw - nbands + 1 then throws a MethodError instead
+        # of saying what happened.  (2) it is read off λ_ref[1], a
+        # TRAINING-GRID k point, and then used as the band index at the CONE
+        # k points.  The occupied count can differ between them -- at a Dirac
+        # point the band exactly at μ flips which side of `x <= 0` it falls on
+        # -- and the reference window then sits on the wrong bands.  The
+        # model's own window is the fixed ktb ± nbands, so there is no single
+        # right answer to substitute silently; pass n_occ explicitly to pin it,
+        # otherwise the old behaviour is kept and the hazard is reported.
+        kpw = n_occ
+        if kpw === nothing
+            kpw = findlast(x -> x <= 0, real.(λ_ref[1]) .- filter.μ)
+            kpw === nothing && error(
+                "RMSE_H: no band at or below μ = $(filter.μ) at k point 1, so " *
+                "the cone window cannot be centred.  Pass n_occ = <band index>.")
+            for c in (nk+1):length(λ_ref)
+                k_c = findlast(x -> x <= 0, real.(λ_ref[c]) .- filter.μ)
+                if k_c !== nothing && k_c != kpw
+                    @warn "RMSE_H: occupied-band count differs between k point 1 " *
+                          "($kpw) and cone k point $(c-nk) ($k_c); the cone " *
+                          "reference window is taken at $kpw.  Pass n_occ to pin it." maxlog=1
+                    break
+                end
+            end
+        end
+        kpw - nbands + 1 >= 1 && kpw + nbands <= length(λ_ref[1]) || error(
+            "RMSE_H: cone window $(kpw-nbands+1):$(kpw+nbands) falls outside the " *
+            "$(length(λ_ref[1])) reference bands.")
 
         λ_pred_cone = getindex.(out.λ[nk+1:end], Ref(ktb-nbands+1:ktb+nbands))
         λ_ref_cone = getindex.(λ_ref[nk+1:end], Ref(kpw-nbands+1:kpw+nbands))
 
-        Δcone = sum(v -> sum(abs2, v), λ_pred_cone .- λ_ref_cone)
+        res_cone = λ_pred_cone .- λ_ref_cone
+        w_cone   = _uniform_weights(res_cone)
+        Δcone    = sum(v -> sum(abs2, v),
+                       _apply_gauge(res_cone, w_cone, cone_gauge))
 
         nsym = length(λ_ref) - nk
         Δcone /= 2nbands * nsym

@@ -83,7 +83,8 @@ println("\n=== Forward pass tests ===")
 @testset "Forward pass" begin
 
     @testset "acev model" begin
-        λlist, st_new = model_acev(G, ps_acev, st_acev)
+        out, st_new = model_acev(G, ps_acev, st_acev)
+        λlist = out.λ   # the final layer returns a NamedTuple, not λlist
         @test λlist isa Vector
         @test length(λlist) == length(klist)
         nk = length(klist)
@@ -98,7 +99,8 @@ println("\n=== Forward pass tests ===")
     end
 
     @testset "Case-B model" begin
-        λlist, st_new = model_B(G, ps_B, st_B)
+        out, st_new = model_B(G, ps_B, st_B)
+        λlist = out.λ   # the final layer returns a NamedTuple, not λlist
         @test length(λlist) == length(klist)
         for ik in eachindex(klist)
             @test all(isfinite, λlist[ik])
@@ -107,7 +109,8 @@ println("\n=== Forward pass tests ===")
     end
 
     @testset "Case-A model" begin
-        λlist, st_new = model_A(G, ps_A, st_A)
+        out, st_new = model_A(G, ps_A, st_A)
+        λlist = out.λ   # the final layer returns a NamedTuple, not λlist
         @test length(λlist) == length(klist)
         for ik in eachindex(klist)
             @test all(isfinite, λlist[ik])

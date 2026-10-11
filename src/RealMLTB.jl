@@ -52,11 +52,16 @@ export build_ace_caseA_Wpsi_model,
        assemble_Wpsi_caseB
 
 include("utils/assemble.jl")
+include("model/wb_multiplet.jl")
+include("model/wb_cg.jl")
 include("model/3c_layers.jl")
 include("model/3c_models.jl")
 include("utils/assembly.jl")
 include("train/train_common.jl")
 include("train/train_single.jl")
+include("train/band_loss.jl")
+include("train/burg.jl")
+include("train/precond.jl")
 include("train/train_multilevel.jl")
 
 export multilevel_train_H

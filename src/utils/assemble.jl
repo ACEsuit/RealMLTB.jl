@@ -1294,58 +1294,13 @@ function _eigenvalue_pullback_one_k(λk, Vk, Δλk, Hk)
     return eltype(Hk).(VH), eltype(Hk).(VS)
 end
 
-function ChainRulesCore.rrule(
-    ::typeof(generate_λ_and_vecs),
-    Hout::CUDA.CuArray{T,3},
-    Sout::CUDA.CuArray{T,3},
-) where {T <: Complex}
-
-    λlist, Vlist = generate_λ_and_vecs(Hout, Sout)
-
-    function pullback_generate_λ_and_vecs(ΔΩ)
-        Δλ_raw = unthunk(ΔΩ[1])
-        ΔV_raw = unthunk(ΔΩ[2])
-
-        Hbar = _zero_like_complex_array(Hout)
-        Sbar = _zero_like_complex_array(Sout)
-
-        if _is_zero_tangent(Δλ_raw)
-            return NoTangent(), Hbar, Sbar
-        end
-
-        if !_is_zero_tangent(ΔV_raw)
-            @warn "generate_λ_and_vecs rrule currently ignores gradients through Vlist; only eigenvalue gradients are handled."
-        end
-
-        nk = size(Hout, 3)
-
-        for ik in 1:nk
-            Δλk = Δλ_raw[ik]
-
-            if _is_zero_tangent(Δλk)
-                continue
-            end
-
-            Hk = @view Hout[:, :, ik]
-
-            Hbar_k, Sbar_k = _eigenvalue_pullback_one_k(
-                λlist[ik],
-                Vlist[ik],
-                Δλk,
-                Hk,
-            )
-
-            @views begin
-                Hbar[:, :, ik] .= Hbar_k
-                Sbar[:, :, ik] .= Sbar_k
-            end
-        end
-
-        return NoTangent(), Hbar, Sbar
-    end
-
-    return (λlist, Vlist), pullback_generate_λ_and_vecs
-end
+# NOTE: an older CUDA rrule for generate_λ_and_vecs(::CuArray{T,3}, ::CuArray{T,3})
+# used to sit here.  It handled only the eigenvalue gradient and warned that it
+# ignored dVlist.  The block further down ("Full CUDA generalized eigenproblem
+# rrule override") was written to replace it but was appended instead, so the
+# same signature was defined twice: Julia refuses to precompile the package and
+# the later definition silently won.  The old one is removed here; the override
+# below, which handles both dlambda and dV, is the live definition.
 
 
 # ============================================================================
