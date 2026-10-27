@@ -1,7 +1,7 @@
 name = "RealMLTB"
 uuid = "286394bb-3f90-4f00-a37d-1f8bcc864c17"
-authors = ["Christoph Ortner <christophortner0@gmail.com>"]
 version = "1.0.0-DEV"
+authors = ["Christoph Ortner <christophortner0@gmail.com>"]
 
 [deps]
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
@@ -27,7 +27,7 @@ LinearAlgebra = "1"
 Lux = "1.21.1"
 LuxCore = "1.4.2"
 Molecules = "0.3.1"
-Optim = "1.13.3"
+Optim = "1.13.3, 2"
 Optimisers = "0.4.6"
 Random = "1"
 StaticArrays = "1.9.15"
